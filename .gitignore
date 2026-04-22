@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+
+# Environment and secrets
+Scripts/Homework/4/.env
+.env
+
+# Service account keys and local secrets
+keys/
