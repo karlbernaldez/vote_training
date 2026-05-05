@@ -2,8 +2,9 @@ import hashlib
 import json
 import os
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Any
 
 import requests
 from dotenv import load_dotenv
@@ -51,7 +52,7 @@ def upload_to_gcs(bucket_name: str, local_file: Path, object_path: str) -> str:
     return f"gs://{bucket_name}/{object_path}"
 
 
-def upload_json_to_gcs(bucket_name: str, data: list, object_path: str) -> str:
+def upload_json_to_gcs(bucket_name: str, data: Any, object_path: str) -> str:
     client = gcs_client()
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(object_path)
@@ -84,6 +85,40 @@ def daterange(start: datetime, end: datetime):
         current += timedelta(days=1)
 
 
+def build_manifest(
+    bucket_name: str,
+    gcs_prefix: str,
+    run_dt: datetime,
+    run_hour: str,
+    forecast_step: int,
+    forecast_max: int,
+    ingest_log: list[dict[str, Any]],
+) -> dict[str, Any]:
+    yyyy = run_dt.strftime("%Y")
+    mm = run_dt.strftime("%m")
+    dd = run_dt.strftime("%d")
+    ymdh = f"{yyyy}{mm}{dd}{run_hour}"
+
+    return {
+        "manifest_version": "1.0",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source": "GFS",
+        "model": "WW3",
+        "bucket": bucket_name,
+        "gcs_prefix": gcs_prefix,
+        "run_date": run_dt.strftime("%Y-%m-%d"),
+        "run_hour": run_hour,
+        "run_time": ymdh,
+        "forecast_step": forecast_step,
+        "forecast_max": forecast_max,
+        "record_count": len(ingest_log),
+        "downloaded": sum(1 for item in ingest_log if item["status"] == "DOWNLOADED_AND_UPLOADED"),
+        "skipped": sum(1 for item in ingest_log if item["status"] == "SKIPPED_ALREADY_EXISTS"),
+        "failed": sum(1 for item in ingest_log if item["status"] == "FAILED"),
+        "files": ingest_log,
+    }
+
+
 def run_cycle(bucket_name: str, gcs_prefix: str, run_dt: datetime, run_hour: str, forecast_step: int, forecast_max: int) -> list:
     yyyy = run_dt.strftime("%Y")
     mm = run_dt.strftime("%m")
@@ -107,6 +142,7 @@ def run_cycle(bucket_name: str, gcs_prefix: str, run_dt: datetime, run_hour: str
             if object_exists(bucket_name, object_path):
                 ingest_log.append({
                     "source": "GFS",
+                    "model": "WW3",
                     "run_time": ymdh,
                     "forecast_hour": fhr,
                     "format": "grib2",
@@ -154,11 +190,13 @@ def run_cycle(bucket_name: str, gcs_prefix: str, run_dt: datetime, run_hour: str
                 })
                 print(f"Failed: {filename} -> {e}")
 
-    log_object_path = (
-        f"{gcs_prefix}/bronze/GFS/"
-        f"{yyyy}/{mm}/{dd}/{hh}/ingest_log.json"
-    )
+    base_object_path = f"{gcs_prefix}/bronze/GFS/{yyyy}/{mm}/{dd}/{hh}"
+    log_object_path = f"{base_object_path}/ingest_log.json"
+    manifest_object_path = f"{base_object_path}/manifest.json"
+
     upload_json_to_gcs(bucket_name, ingest_log, log_object_path)
+    manifest = build_manifest(bucket_name, gcs_prefix, run_dt, run_hour, forecast_step, forecast_max, ingest_log)
+    upload_json_to_gcs(bucket_name, manifest, manifest_object_path)
     return ingest_log
 
 
