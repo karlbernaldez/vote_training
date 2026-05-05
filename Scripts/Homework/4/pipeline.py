@@ -1,5 +1,7 @@
+import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -51,6 +53,37 @@ def prefix_for_backend(storage_backend: str) -> str:
     if storage_backend == "gcs":
         return env_value("GCS_PREFIX") or env_value("STORAGE_PREFIX") or "vote"
     return env_value("S3_PREFIX") or env_value("STORAGE_PREFIX") or "vote"
+
+
+def validate_backend_config(storage_backends: list[str]) -> None:
+    """Fail early with actionable config errors before any ingest work starts."""
+    if "gcs" in storage_backends:
+        credentials_path = env_value("GOOGLE_APPLICATION_CREDENTIALS")
+        if not credentials_path:
+            raise ValueError(
+                "GOOGLE_APPLICATION_CREDENTIALS is required when running the GCS backend. "
+                "When using Docker, mount the key to /app/gcp-key.json and set "
+                "GOOGLE_APPLICATION_CREDENTIALS=/app/gcp-key.json."
+            )
+        if not Path(credentials_path).is_file():
+            raise FileNotFoundError(
+                f"GOOGLE_APPLICATION_CREDENTIALS points to '{credentials_path}', but that file does not exist "
+                "inside the container. Pass GCP_KEY_PATH=/host/path/key.json to run-pipeline.sh so it can mount "
+                "the key as /app/gcp-key.json."
+            )
+        if not env_value("GCS_BUCKET_NAME"):
+            raise ValueError("GCS_BUCKET_NAME is required when running the GCS backend.")
+
+    if "s3" in storage_backends:
+        if not env_value("S3_BUCKET_NAME"):
+            raise ValueError("S3_BUCKET_NAME is required when running the S3 backend.")
+        has_ceph_credentials = bool(env_value("CEPH_ACCESS_KEY") and env_value("CEPH_SECRET_KEY"))
+        has_aws_credentials = bool(env_value("AWS_ACCESS_KEY_ID") and env_value("AWS_SECRET_ACCESS_KEY"))
+        if not has_ceph_credentials and not has_aws_credentials and not env_value("S3_ALLOW_ANONYMOUS"):
+            raise ValueError(
+                "S3 credentials are required when running the S3 backend. Set CEPH_ACCESS_KEY and "
+                "CEPH_SECRET_KEY, or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY."
+            )
 
 
 def source_is_available(run_dt: datetime, run_hour: str, forecast_hour: int, timeout: int = 30) -> bool:
@@ -137,6 +170,8 @@ def main() -> int:
     load_dotenv()
 
     storage_backends = selected_storage_backends()
+    validate_backend_config(storage_backends)
+
     run_hour = env_value("RUN_HOUR") or "00"
     forecast_start = int(env_value("FORECAST_START") or "0")
     forecast_step = int(env_value("FORECAST_STEP") or "3")
