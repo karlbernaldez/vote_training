@@ -1,43 +1,99 @@
 # Ingest Tests
 
-These tests check that the ingest script still works when code changes are made.
-
-They are focused on the ingest workflow in:
+These tests are safety checks for the ingest code in:
 
 ```text
 Scripts/Homework/4/ingest.py
 ```
 
-## What the tests cover
+Simple version: **the tests make sure the ingest script can create logs and manifests, work with GCS and Ceph, handle credentials, and keep the known Ceph upload workaround working.**
 
-The tests make sure the script can:
+## What the tests check
 
-- Build a correct `manifest.json` summary.
-- Write ingest logs and manifests.
-- Support both GCS and S3/Ceph storage backends.
-- Parse a Ceph-style bucket URL, such as:
+### 1. The script can make a manifest
 
-  ```text
-  http://10.11.1.171:30080/raw-ingest
-  ```
+The tests check that `manifest.json` correctly counts:
 
-- Use either Ceph credentials or AWS-style credentials.
-- Configure the S3 client with path-style addressing for Ceph.
-- Skip the S3 `HeadObject` exists check when `S3_SKIP_EXISTS_CHECK=true`.
-- Raise a helpful error when S3/Ceph blocks the exists check with `AccessDenied`.
+- downloaded files
+- skipped files
+- failed files
+
+This matters because the manifest tells us what happened during an ingest run.
+
+### 2. The script works with both storage systems
+
+The tests check both supported storage backends:
+
+- GCS paths like `gs://...`
+- S3/Ceph paths like `s3://...`
+
+This helps make sure the new S3/Ceph support does not break the older GCS flow.
+
+### 3. The script can skip files that already exist
+
+If a file is already in the bucket, the tests make sure the script does not download or upload it again.
+
+The expected status is:
+
+```text
+SKIPPED_ALREADY_EXISTS
+```
+
+### 4. The script understands the Ceph bucket URL
+
+The tests check that this value:
+
+```text
+http://10.11.1.171:30080/raw-ingest
+```
+
+is parsed as:
+
+```text
+endpoint = http://10.11.1.171:30080
+bucket   = raw-ingest
+```
+
+### 5. The script handles credentials correctly
+
+The tests check that the script accepts either:
+
+```text
+CEPH_ACCESS_KEY
+CEPH_SECRET_KEY
+```
+
+or:
+
+```text
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+```
+
+### 6. The script handles the Ceph permission issue
+
+Some Ceph setups allow uploads but block the `HeadObject` exists check.
+
+The tests make sure this workaround works:
+
+```bash
+S3_SKIP_EXISTS_CHECK=true
+```
+
+They also check that when Ceph blocks the exists check with `AccessDenied`, the script gives a helpful error.
 
 ## What the tests do not do
 
-The tests do not contact real external systems.
+The tests do not use real external services.
 
 They do not actually:
 
-- Download data from NOAA.
-- Upload files to GCS.
-- Upload files to S3 or Ceph.
-- Require real cloud credentials.
+- download data from NOAA
+- upload files to GCS
+- upload files to S3 or Ceph
+- require real cloud credentials
 
-Instead, the tests use fake downloads, fake uploads, and mocked clients so they can run safely in GitHub Actions.
+Instead, they use fake downloads, fake uploads, and mocked clients so they can run safely in GitHub Actions.
 
 ## Run the tests locally
 
@@ -55,21 +111,10 @@ pytest -q
 
 ## GitHub Actions
 
-The GitHub Actions workflow runs the same test command automatically:
+GitHub Actions runs the same command automatically:
 
 ```bash
 pytest -q
 ```
 
-This helps catch regressions before the `ingest` branch is merged.
-
-## Why these tests matter
-
-The ingest branch added support for S3-compatible Ceph uploads while keeping the older GCS flow working.
-
-These tests protect the important behavior:
-
-- GCS should still work.
-- S3/Ceph should work.
-- Manifest and ingest log output should stay consistent.
-- The known Ceph `HeadObject` permission issue should remain handled.
+This helps catch problems before the `ingest` branch is merged.
