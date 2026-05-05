@@ -22,6 +22,180 @@ Where:
 
 ---
 
+## Data lake path visualization
+
+```mermaid
+flowchart LR
+    A[Storage Backend<br/>s3 or gs] --> B[Bucket<br/>raw-ingest]
+    B --> C[Storage Prefix<br/>WaveWatchIII]
+    C --> D[Lake Layer<br/>bronze]
+    D --> E[Source<br/>GFS]
+    E --> F[Year<br/>2026]
+    F --> G[Month<br/>04]
+    G --> H[Day<br/>26]
+    H --> I[Run Hour<br/>00]
+    I --> J[Forecast Hour<br/>000]
+    J --> K[Object<br/>2026042600_f000.grib2]
+```
+
+Example expanded path:
+
+```text
+s3://raw-ingest
+  /WaveWatchIII
+    /bronze
+      /GFS
+        /2026
+          /04
+            /26
+              /00
+                /000
+                  /2026042600_f000.grib2
+```
+
+---
+
+## Metadata relationship visualization
+
+```mermaid
+erDiagram
+    AUTHOR ||--o{ DATASET : owns
+    SOURCE_MODEL ||--o{ DATASET : defines
+    DOMAIN ||--o{ DATASET : bounds
+    DATASET ||--o{ DATASET_VARIABLE : contains
+    VARIABLE ||--o{ DATASET_VARIABLE : describes
+    SOURCE_MODEL ||--o{ VARIABLE_MAP : maps
+    VARIABLE ||--o{ VARIABLE_MAP : normalizes
+    DATASET ||--o{ INGEST_RUN : produces
+    STORAGE_BACKEND ||--o{ INGEST_RUN : stores
+    INGEST_RUN ||--o{ LAKE_OBJECT : writes
+    DATASET ||--o{ LAKE_OBJECT : catalogs
+    STORAGE_BACKEND ||--o{ LAKE_OBJECT : locates
+    LAKE_OBJECT ||--|| LAKE_PARTITION : partitions
+
+    AUTHOR {
+        int id PK
+        string first_name
+        string last_name
+        string email
+    }
+
+    SOURCE_MODEL {
+        int id PK
+        string source
+        string model
+        string provider
+        string base_url
+    }
+
+    DOMAIN {
+        int id PK
+        string name
+        decimal min_lat
+        decimal max_lat
+        decimal min_lon
+        decimal max_lon
+    }
+
+    DATASET {
+        int id PK
+        int source_model_id FK
+        int domain_id FK
+        int author_id FK
+        string name
+        string format
+        string type
+        string default_storage_prefix
+        string status
+    }
+
+    STORAGE_BACKEND {
+        int id PK
+        string backend
+        string scheme
+        string bucket
+        string endpoint_url
+        string addressing_style
+        string signature_version
+        string status
+    }
+
+    INGEST_RUN {
+        int id PK
+        int dataset_id FK
+        int storage_backend_id FK
+        date run_date
+        string run_hour
+        string run_time
+        int forecast_step
+        int forecast_max
+        int record_count
+        int downloaded_count
+        int skipped_count
+        int failed_count
+        string manifest_uri
+        string ingest_log_uri
+        string status
+    }
+
+    LAKE_OBJECT {
+        int id PK
+        int dataset_id FK
+        int storage_backend_id FK
+        int ingest_run_id FK
+        string lake_layer
+        string storage_prefix
+        string object_path
+        string storage_uri
+        string provider_uri
+        string object_kind
+        string file_name
+        string format
+        int file_size_bytes
+        string checksum_sha256
+        string status
+    }
+
+    LAKE_PARTITION {
+        int id PK
+        int lake_object_id FK
+        string source
+        string year
+        string month
+        string day
+        string run_hour
+        string run_time
+        string forecast_hour
+        int forecast_step
+        int forecast_max
+    }
+
+    VARIABLE {
+        int id PK
+        string code
+        string name
+        string unit
+        string value_type
+    }
+
+    DATASET_VARIABLE {
+        int id PK
+        int dataset_id FK
+        int variable_id FK
+    }
+
+    VARIABLE_MAP {
+        int id PK
+        int source_model_id FK
+        int variable_id FK
+        string provider_code
+        string provider_name
+        string level
+    }
+```
+
+---
+
 ## Dataset
 
 Represents a logical dataset or model product, independent of a single physical object.
