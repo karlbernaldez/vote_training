@@ -6,9 +6,13 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
+import boto3
 import requests
+from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from google.cloud import storage
+
+SUPPORTED_STORAGE_BACKENDS = {"gcs", "s3"}
 
 
 def sha256sum(file_path: Path) -> str:
@@ -17,6 +21,34 @@ def sha256sum(file_path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def normalize_storage_backend(storage_backend: str) -> str:
+    backend = storage_backend.strip().lower()
+    if backend not in SUPPORTED_STORAGE_BACKENDS:
+        supported = ", ".join(sorted(SUPPORTED_STORAGE_BACKENDS))
+        raise ValueError(f"Unsupported STORAGE_BACKEND '{storage_backend}'. Use one of: {supported}.")
+    return backend
+
+
+def storage_uri(storage_backend: str, bucket_name: str, object_path: str) -> str:
+    backend = normalize_storage_backend(storage_backend)
+    scheme = "gs" if backend == "gcs" else "s3"
+    return f"{scheme}://{bucket_name}/{object_path}"
+
+
+def with_storage_uri(record: dict[str, Any], storage_backend: str, bucket_name: str, object_path: str) -> dict[str, Any]:
+    uri = storage_uri(storage_backend, bucket_name, object_path)
+    record["storage_backend"] = normalize_storage_backend(storage_backend)
+    record["storage_uri"] = uri
+
+    # Keep the provider-specific URI fields for backward compatibility with older logs.
+    if record["storage_backend"] == "gcs":
+        record["gcs_uri"] = uri
+    else:
+        record["s3_uri"] = uri
+
+    return record
 
 
 def build_download_url(yyyy: str, mm: str, dd: str, hh: str, fhr: str) -> str:
@@ -39,25 +71,65 @@ def gcs_client() -> storage.Client:
     return storage.Client()
 
 
-def object_exists(bucket_name: str, object_path: str) -> bool:
-    client = gcs_client()
-    return client.bucket(bucket_name).blob(object_path).exists(client)
+def s3_client():
+    return boto3.client("s3")
 
 
+def object_exists(storage_backend: str, bucket_name: str, object_path: str) -> bool:
+    backend = normalize_storage_backend(storage_backend)
+    if backend == "gcs":
+        client = gcs_client()
+        return client.bucket(bucket_name).blob(object_path).exists(client)
+
+    try:
+        s3_client().head_object(Bucket=bucket_name, Key=object_path)
+        return True
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code")
+        if error_code in {"404", "NoSuchKey", "NotFound"}:
+            return False
+        raise
+
+
+def upload_file(storage_backend: str, bucket_name: str, local_file: Path, object_path: str) -> str:
+    backend = normalize_storage_backend(storage_backend)
+    if backend == "gcs":
+        client = gcs_client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(object_path)
+        blob.upload_from_filename(str(local_file))
+        return storage_uri(backend, bucket_name, object_path)
+
+    s3_client().upload_file(str(local_file), bucket_name, object_path)
+    return storage_uri(backend, bucket_name, object_path)
+
+
+def upload_json(storage_backend: str, bucket_name: str, data: Any, object_path: str) -> str:
+    backend = normalize_storage_backend(storage_backend)
+    body = json.dumps(data, indent=2)
+    if backend == "gcs":
+        client = gcs_client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(object_path)
+        blob.upload_from_string(body, content_type="application/json")
+        return storage_uri(backend, bucket_name, object_path)
+
+    s3_client().put_object(
+        Bucket=bucket_name,
+        Key=object_path,
+        Body=body.encode("utf-8"),
+        ContentType="application/json",
+    )
+    return storage_uri(backend, bucket_name, object_path)
+
+
+# Backward-compatible wrappers for callers that imported the old GCS-specific helpers.
 def upload_to_gcs(bucket_name: str, local_file: Path, object_path: str) -> str:
-    client = gcs_client()
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(object_path)
-    blob.upload_from_filename(str(local_file))
-    return f"gs://{bucket_name}/{object_path}"
+    return upload_file("gcs", bucket_name, local_file, object_path)
 
 
 def upload_json_to_gcs(bucket_name: str, data: Any, object_path: str) -> str:
-    client = gcs_client()
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(object_path)
-    blob.upload_from_string(json.dumps(data, indent=2), content_type="application/json")
-    return f"gs://{bucket_name}/{object_path}"
+    return upload_json("gcs", bucket_name, data, object_path)
 
 
 def download_file(url: str, local_path: Path, timeout: int = 120) -> None:
@@ -93,7 +165,9 @@ def build_manifest(
     forecast_step: int,
     forecast_max: int,
     ingest_log: list[dict[str, Any]],
+    storage_backend: str = "gcs",
 ) -> dict[str, Any]:
+    backend = normalize_storage_backend(storage_backend)
     yyyy = run_dt.strftime("%Y")
     mm = run_dt.strftime("%m")
     dd = run_dt.strftime("%d")
@@ -104,8 +178,10 @@ def build_manifest(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "GFS",
         "model": "WW3",
+        "storage_backend": backend,
         "bucket": bucket_name,
         "gcs_prefix": gcs_prefix,
+        "storage_prefix": gcs_prefix,
         "run_date": run_dt.strftime("%Y-%m-%d"),
         "run_hour": run_hour,
         "run_time": ymdh,
@@ -119,7 +195,16 @@ def build_manifest(
     }
 
 
-def run_cycle(bucket_name: str, gcs_prefix: str, run_dt: datetime, run_hour: str, forecast_step: int, forecast_max: int) -> list:
+def run_cycle(
+    bucket_name: str,
+    gcs_prefix: str,
+    run_dt: datetime,
+    run_hour: str,
+    forecast_step: int,
+    forecast_max: int,
+    storage_backend: str = "gcs",
+) -> list:
+    backend = normalize_storage_backend(storage_backend)
     yyyy = run_dt.strftime("%Y")
     mm = run_dt.strftime("%m")
     dd = run_dt.strftime("%d")
@@ -139,18 +224,17 @@ def run_cycle(bucket_name: str, gcs_prefix: str, run_dt: datetime, run_hour: str
             )
             download_url = build_download_url(yyyy, mm, dd, hh, fhr)
 
-            if object_exists(bucket_name, object_path):
-                ingest_log.append({
+            if object_exists(backend, bucket_name, object_path):
+                ingest_log.append(with_storage_uri({
                     "source": "GFS",
                     "model": "WW3",
                     "run_time": ymdh,
                     "forecast_hour": fhr,
                     "format": "grib2",
                     "object_path": object_path,
-                    "gcs_uri": f"gs://{bucket_name}/{object_path}",
                     "status": "SKIPPED_ALREADY_EXISTS",
-                })
-                print(f"Skip existing: gs://{bucket_name}/{object_path}")
+                }, backend, bucket_name, object_path))
+                print(f"Skip existing: {storage_uri(backend, bucket_name, object_path)}")
                 continue
 
             local_path = tmpdir_path / filename
@@ -159,8 +243,8 @@ def run_cycle(bucket_name: str, gcs_prefix: str, run_dt: datetime, run_hour: str
                 download_file(download_url, local_path)
                 checksum = sha256sum(local_path)
                 size = local_path.stat().st_size
-                gcs_uri = upload_to_gcs(bucket_name, local_path, object_path)
-                ingest_log.append({
+                object_uri = upload_file(backend, bucket_name, local_path, object_path)
+                ingest_log.append(with_storage_uri({
                     "source": "GFS",
                     "model": "WW3",
                     "run_time": ymdh,
@@ -168,17 +252,17 @@ def run_cycle(bucket_name: str, gcs_prefix: str, run_dt: datetime, run_hour: str
                     "format": "grib2",
                     "download_url": download_url,
                     "object_path": object_path,
-                    "gcs_uri": gcs_uri,
                     "file_name": filename,
                     "file_size": size,
                     "checksum_sha256": checksum,
                     "status": "DOWNLOADED_AND_UPLOADED",
-                })
-                print(f"Uploaded: {gcs_uri}")
+                }, backend, bucket_name, object_path))
+                print(f"Uploaded: {object_uri}")
             except Exception as e:
                 ingest_log.append({
                     "source": "GFS",
                     "model": "WW3",
+                    "storage_backend": backend,
                     "run_time": ymdh,
                     "forecast_hour": fhr,
                     "format": "grib2",
@@ -194,17 +278,25 @@ def run_cycle(bucket_name: str, gcs_prefix: str, run_dt: datetime, run_hour: str
     log_object_path = f"{base_object_path}/ingest_log.json"
     manifest_object_path = f"{base_object_path}/manifest.json"
 
-    upload_json_to_gcs(bucket_name, ingest_log, log_object_path)
-    manifest = build_manifest(bucket_name, gcs_prefix, run_dt, run_hour, forecast_step, forecast_max, ingest_log)
-    upload_json_to_gcs(bucket_name, manifest, manifest_object_path)
+    upload_json(backend, bucket_name, ingest_log, log_object_path)
+    manifest = build_manifest(bucket_name, gcs_prefix, run_dt, run_hour, forecast_step, forecast_max, ingest_log, backend)
+    upload_json(backend, bucket_name, manifest, manifest_object_path)
     return ingest_log
+
+
+def bucket_name_for_backend(storage_backend: str) -> str | None:
+    backend = normalize_storage_backend(storage_backend)
+    if backend == "gcs":
+        return os.getenv("GCS_BUCKET_NAME")
+    return os.getenv("S3_BUCKET_NAME")
 
 
 def main():
     load_dotenv()
 
-    bucket_name = os.getenv("GCS_BUCKET_NAME")
-    gcs_prefix = os.getenv("GCS_PREFIX", "vote")
+    storage_backend = normalize_storage_backend(os.getenv("STORAGE_BACKEND", "gcs"))
+    bucket_name = bucket_name_for_backend(storage_backend)
+    gcs_prefix = os.getenv("STORAGE_PREFIX", os.getenv("GCS_PREFIX", "vote"))
     run_hour = os.getenv("RUN_HOUR", "00")
     forecast_step = int(os.getenv("FORECAST_STEP", "3"))
     forecast_max = int(os.getenv("FORECAST_MAX", "72"))
@@ -212,7 +304,8 @@ def main():
     end_date = os.getenv("END_DATE")
 
     if not bucket_name:
-        raise ValueError("GCS_BUCKET_NAME is required in .env")
+        bucket_env_var = "GCS_BUCKET_NAME" if storage_backend == "gcs" else "S3_BUCKET_NAME"
+        raise ValueError(f"{bucket_env_var} is required in .env when STORAGE_BACKEND={storage_backend}")
     if not start_date or not end_date:
         raise ValueError("START_DATE and END_DATE are required in .env")
 
@@ -223,8 +316,9 @@ def main():
 
     summary = []
     for run_dt in daterange(start_dt, end_dt):
-        cycle_log = run_cycle(bucket_name, gcs_prefix, run_dt, run_hour, forecast_step, forecast_max)
+        cycle_log = run_cycle(bucket_name, gcs_prefix, run_dt, run_hour, forecast_step, forecast_max, storage_backend)
         summary.append({
+            "storage_backend": storage_backend,
             "run_date": run_dt.strftime("%Y-%m-%d"),
             "run_hour": run_hour,
             "records": len(cycle_log),
