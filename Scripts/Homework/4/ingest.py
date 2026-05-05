@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import boto3
 import requests
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from google.cloud import storage
@@ -65,6 +66,21 @@ def s3_endpoint_url() -> str | None:
     return endpoint_url
 
 
+def s3_credentials() -> dict[str, str]:
+    access_key = os.getenv("CEPH_ACCESS_KEY") or os.getenv("AWS_ACCESS_KEY_ID")
+    secret_key = os.getenv("CEPH_SECRET_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY")
+
+    if bool(access_key) != bool(secret_key):
+        raise ValueError("Both CEPH_ACCESS_KEY and CEPH_SECRET_KEY are required for Ceph S3 authentication.")
+    if not access_key:
+        return {}
+
+    return {
+        "aws_access_key_id": access_key,
+        "aws_secret_access_key": secret_key,
+    }
+
+
 def storage_uri(storage_backend: str, bucket_name: str, object_path: str) -> str:
     backend = normalize_storage_backend(storage_backend)
     scheme = "gs" if backend == "gcs" else "s3"
@@ -106,10 +122,17 @@ def gcs_client() -> storage.Client:
 
 
 def s3_client():
+    client_kwargs = {
+        "config": Config(
+            signature_version=os.getenv("S3_SIGNATURE_VERSION", "s3v4"),
+            s3={"addressing_style": os.getenv("S3_ADDRESSING_STYLE", "path")},
+        )
+    }
     endpoint_url = s3_endpoint_url()
     if endpoint_url:
-        return boto3.client("s3", endpoint_url=endpoint_url)
-    return boto3.client("s3")
+        client_kwargs["endpoint_url"] = endpoint_url
+    client_kwargs.update(s3_credentials())
+    return boto3.client("s3", **client_kwargs)
 
 
 def object_exists(storage_backend: str, bucket_name: str, object_path: str) -> bool:
