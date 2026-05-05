@@ -32,7 +32,12 @@ if "boto3" not in sys.modules:
 
 if "botocore" not in sys.modules:
     botocore_module = types.ModuleType("botocore")
+    config_module = types.ModuleType("botocore.config")
     exceptions_module = types.ModuleType("botocore.exceptions")
+
+    class Config:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
 
     class ClientError(Exception):
         def __init__(self, error_response, operation_name):
@@ -40,7 +45,10 @@ if "botocore" not in sys.modules:
             self.operation_name = operation_name
             super().__init__(str(error_response))
 
+    config_module.Config = Config
     exceptions_module.ClientError = ClientError
+    botocore_module.config = config_module
     botocore_module.exceptions = exceptions_module
     sys.modules["botocore"] = botocore_module
+    sys.modules["botocore.config"] = config_module
     sys.modules["botocore.exceptions"] = exceptions_module
