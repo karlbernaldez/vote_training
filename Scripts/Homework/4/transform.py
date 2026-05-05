@@ -14,7 +14,7 @@ from ingest import (
     gcs_client,
     normalize_storage_backend,
     parse_date,
-    s3_client,
+    s3_client,  
     sha256sum,
     storage_uri,
     upload_json,
