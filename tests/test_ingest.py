@@ -256,7 +256,7 @@ def test_s3_credentials_require_both_values(ingest, monkeypatch):
     monkeypatch.delenv("CEPH_SECRET_KEY", raising=False)
     monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
 
-    with pytest.raises(ValueError, match="Both CEPH_ACCESS_KEY and CEPH_SECRET_KEY"):
+    with pytest.raises(ValueError, match="Both access key and secret key"):
         ingest.s3_credentials()
 
 
@@ -279,3 +279,29 @@ def test_s3_client_uses_endpoint_credentials_and_path_style_config(ingest, monke
     assert calls[0][1]["aws_access_key_id"] == "access-value"
     assert calls[0][1]["aws_secret_access_key"] == "credential-value"
     assert calls[0][1]["config"].kwargs["s3"] == {"addressing_style": "path"}
+
+
+def test_s3_skip_exists_check_does_not_call_head_object(ingest, monkeypatch):
+    class FakeS3Client:
+        def head_object(self, **kwargs):
+            pytest.fail("head_object should not run when S3_SKIP_EXISTS_CHECK=true")
+
+    monkeypatch.setenv("S3_SKIP_EXISTS_CHECK", "true")
+    monkeypatch.setattr(ingest, "s3_client", lambda: FakeS3Client())
+
+    assert ingest.object_exists("s3", "bucket", "path/to/object.grib2") is False
+
+
+def test_s3_head_object_access_denied_suggests_skip_exists_check(ingest, monkeypatch):
+    class FakeS3Client:
+        def head_object(self, **kwargs):
+            raise ingest.ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "Forbidden"}},
+                "HeadObject",
+            )
+
+    monkeypatch.delenv("S3_SKIP_EXISTS_CHECK", raising=False)
+    monkeypatch.setattr(ingest, "s3_client", lambda: FakeS3Client())
+
+    with pytest.raises(PermissionError, match="S3_SKIP_EXISTS_CHECK=true"):
+        ingest.object_exists("s3", "bucket", "path/to/object.grib2")
