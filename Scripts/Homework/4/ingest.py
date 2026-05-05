@@ -87,12 +87,16 @@ def s3_credentials() -> dict[str, str]:
     secret_key = env_value("CEPH_SECRET_KEY") or env_value("AWS_SECRET_ACCESS_KEY")
 
     if bool(access_key) != bool(secret_key):
-        raise ValueError("Both CEPH_ACCESS_KEY and CEPH_SECRET_KEY are required for Ceph S3 authentication.")
+        raise ValueError(
+            "Both access key and secret key are required for S3 authentication. "
+            "Set CEPH_ACCESS_KEY and CEPH_SECRET_KEY, or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY."
+        )
     if not access_key:
         if s3_endpoint_url() and not env_flag("S3_ALLOW_ANONYMOUS"):
             raise ValueError(
-                "CEPH_ACCESS_KEY and CEPH_SECRET_KEY are required when using a custom S3/Ceph endpoint. "
-                "Set both values in .env, or set S3_ALLOW_ANONYMOUS=true only if this bucket intentionally allows anonymous writes."
+                "S3 credentials are required when using a custom S3/Ceph endpoint. "
+                "Set CEPH_ACCESS_KEY and CEPH_SECRET_KEY, or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. "
+                "Set S3_ALLOW_ANONYMOUS=true only if this bucket intentionally allows anonymous writes."
             )
         return {}
 
@@ -175,7 +179,7 @@ def object_exists(storage_backend: str, bucket_name: str, object_path: str) -> b
         if error_code in {"403", "AccessDenied"}:
             raise PermissionError(
                 "Ceph/S3 denied HeadObject while checking whether the object already exists. "
-                "Verify CEPH_ACCESS_KEY and CEPH_SECRET_KEY. If the key can write objects but cannot head/read them, "
+                "Verify the configured S3 credentials. If the key can write objects but cannot head/read them, "
                 "set S3_SKIP_EXISTS_CHECK=true to upload without the pre-check."
             ) from e
         raise
@@ -387,7 +391,7 @@ def bucket_name_for_backend(storage_backend: str) -> str | None:
 
 
 def main():
-    load_dotenv(override=True)
+    load_dotenv()
 
     storage_backend = normalize_storage_backend(env_value("STORAGE_BACKEND") or "gcs")
     bucket_name = bucket_name_for_backend(storage_backend)
