@@ -14,11 +14,15 @@ from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from google.cloud import storage
 
+# The ingest script currently supports Google Cloud Storage and S3-compatible storage.
 SUPPORTED_STORAGE_BACKENDS = {"gcs", "s3"}
+
+# Accepted truthy values for boolean environment flags such as S3_SKIP_EXISTS_CHECK.
 TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 
 
 def env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean environment variable."""
     value = os.getenv(name)
     if value is None:
         return default
@@ -26,6 +30,7 @@ def env_flag(name: str, default: bool = False) -> bool:
 
 
 def env_value(name: str) -> str | None:
+    """Read an environment variable and treat blank strings as missing."""
     value = os.getenv(name)
     if value is None:
         return None
@@ -34,6 +39,7 @@ def env_value(name: str) -> str | None:
 
 
 def sha256sum(file_path: Path) -> str:
+    """Calculate a file checksum so uploaded files can be verified later."""
     h = hashlib.sha256()
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
@@ -42,6 +48,7 @@ def sha256sum(file_path: Path) -> str:
 
 
 def normalize_storage_backend(storage_backend: str) -> str:
+    """Normalize and validate the requested storage backend."""
     backend = storage_backend.strip().lower()
     if backend not in SUPPORTED_STORAGE_BACKENDS:
         supported = ", ".join(sorted(SUPPORTED_STORAGE_BACKENDS))
@@ -70,6 +77,7 @@ def split_s3_bucket_config(raw_bucket_config: str) -> tuple[str | None, str]:
 
 
 def s3_endpoint_url() -> str | None:
+    """Find the S3/Ceph endpoint from explicit config or from the bucket URL."""
     explicit_endpoint = env_value("S3_ENDPOINT_URL")
     if explicit_endpoint:
         return explicit_endpoint.rstrip("/")
@@ -83,6 +91,7 @@ def s3_endpoint_url() -> str | None:
 
 
 def s3_credentials() -> dict[str, str]:
+    """Read S3 credentials from Ceph-style or AWS-style environment variables."""
     access_key = env_value("CEPH_ACCESS_KEY") or env_value("AWS_ACCESS_KEY_ID")
     secret_key = env_value("CEPH_SECRET_KEY") or env_value("AWS_SECRET_ACCESS_KEY")
 
@@ -107,12 +116,14 @@ def s3_credentials() -> dict[str, str]:
 
 
 def storage_uri(storage_backend: str, bucket_name: str, object_path: str) -> str:
+    """Build the final object URI for GCS or S3."""
     backend = normalize_storage_backend(storage_backend)
     scheme = "gs" if backend == "gcs" else "s3"
     return f"{scheme}://{bucket_name}/{object_path}"
 
 
 def with_storage_uri(record: dict[str, Any], storage_backend: str, bucket_name: str, object_path: str) -> dict[str, Any]:
+    """Add storage URI fields to an ingest log record."""
     uri = storage_uri(storage_backend, bucket_name, object_path)
     record["storage_backend"] = normalize_storage_backend(storage_backend)
     record["storage_uri"] = uri
@@ -127,6 +138,7 @@ def with_storage_uri(record: dict[str, Any], storage_backend: str, bucket_name: 
 
 
 def build_download_url(yyyy: str, mm: str, dd: str, hh: str, fhr: str) -> str:
+    """Build the NOAA GFS download URL for one forecast hour."""
     return (
         "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
         f"?dir=%2Fgfs.{yyyy}{mm}{dd}%2F{hh}%2Fatmos"
@@ -143,10 +155,12 @@ def build_download_url(yyyy: str, mm: str, dd: str, hh: str, fhr: str) -> str:
 
 
 def gcs_client() -> storage.Client:
+    """Create a Google Cloud Storage client."""
     return storage.Client()
 
 
 def s3_client():
+    """Create an S3 client configured for AWS S3 or S3-compatible Ceph."""
     client_kwargs = {
         "config": Config(
             signature_version=env_value("S3_SIGNATURE_VERSION") or "s3v4",
@@ -161,11 +175,14 @@ def s3_client():
 
 
 def object_exists(storage_backend: str, bucket_name: str, object_path: str) -> bool:
+    """Check whether an object already exists before downloading and uploading it."""
     backend = normalize_storage_backend(storage_backend)
     if backend == "gcs":
         client = gcs_client()
         return client.bucket(bucket_name).blob(object_path).exists(client)
 
+    # Some Ceph users can upload objects but cannot run HeadObject.
+    # This flag skips the existence check and uploads directly.
     if env_flag("S3_SKIP_EXISTS_CHECK"):
         return False
 
@@ -186,6 +203,7 @@ def object_exists(storage_backend: str, bucket_name: str, object_path: str) -> b
 
 
 def upload_file(storage_backend: str, bucket_name: str, local_file: Path, object_path: str) -> str:
+    """Upload one downloaded data file to the selected storage backend."""
     backend = normalize_storage_backend(storage_backend)
     if backend == "gcs":
         client = gcs_client()
@@ -199,6 +217,7 @@ def upload_file(storage_backend: str, bucket_name: str, local_file: Path, object
 
 
 def upload_json(storage_backend: str, bucket_name: str, data: Any, object_path: str) -> str:
+    """Upload JSON metadata, such as the ingest log or manifest."""
     backend = normalize_storage_backend(storage_backend)
     body = json.dumps(data, indent=2)
     if backend == "gcs":
@@ -227,6 +246,7 @@ def upload_json_to_gcs(bucket_name: str, data: Any, object_path: str) -> str:
 
 
 def download_file(url: str, local_path: Path, timeout: int = 120) -> None:
+    """Download one file from NOAA into a temporary local path."""
     with requests.get(url, stream=True, timeout=timeout) as response:
         response.raise_for_status()
         with open(local_path, "wb") as file:
@@ -236,6 +256,7 @@ def download_file(url: str, local_path: Path, timeout: int = 120) -> None:
 
 
 def parse_date(value: str) -> datetime:
+    """Parse START_DATE and END_DATE values from the environment."""
     for fmt in ("%Y%m%d", "%Y-%m-%d"):
         try:
             return datetime.strptime(value, fmt)
@@ -245,6 +266,7 @@ def parse_date(value: str) -> datetime:
 
 
 def daterange(start: datetime, end: datetime):
+    """Yield each date between start and end, inclusive."""
     current = start
     while current <= end:
         yield current
@@ -261,6 +283,7 @@ def build_manifest(
     ingest_log: list[dict[str, Any]],
     storage_backend: str = "gcs",
 ) -> dict[str, Any]:
+    """Build a summary JSON record for the whole ingest cycle."""
     backend = normalize_storage_backend(storage_backend)
     yyyy = run_dt.strftime("%Y")
     mm = run_dt.strftime("%m")
@@ -298,6 +321,7 @@ def run_cycle(
     forecast_max: int,
     storage_backend: str = "gcs",
 ) -> list:
+    """Download and upload all forecast files for one run date and run hour."""
     backend = normalize_storage_backend(storage_backend)
     yyyy = run_dt.strftime("%Y")
     mm = run_dt.strftime("%m")
@@ -318,6 +342,7 @@ def run_cycle(
             )
             download_url = build_download_url(yyyy, mm, dd, hh, fhr)
 
+            # Skip work when the target object already exists.
             if object_exists(backend, bucket_name, object_path):
                 ingest_log.append(with_storage_uri({
                     "source": "GFS",
@@ -353,6 +378,7 @@ def run_cycle(
                 }, backend, bucket_name, object_path))
                 print(f"Uploaded: {object_uri}")
             except Exception as e:
+                # Keep going after one failed forecast file so the rest of the cycle can still run.
                 ingest_log.append({
                     "source": "GFS",
                     "model": "WW3",
@@ -372,6 +398,7 @@ def run_cycle(
     log_object_path = f"{base_object_path}/ingest_log.json"
     manifest_object_path = f"{base_object_path}/manifest.json"
 
+    # Write detailed file-level metadata and a summary manifest next to the data files.
     upload_json(backend, bucket_name, ingest_log, log_object_path)
     manifest = build_manifest(bucket_name, gcs_prefix, run_dt, run_hour, forecast_step, forecast_max, ingest_log, backend)
     upload_json(backend, bucket_name, manifest, manifest_object_path)
@@ -379,6 +406,7 @@ def run_cycle(
 
 
 def bucket_name_for_backend(storage_backend: str) -> str | None:
+    """Choose the correct bucket variable for the selected backend."""
     backend = normalize_storage_backend(storage_backend)
     if backend == "gcs":
         return env_value("GCS_BUCKET_NAME")
@@ -391,8 +419,10 @@ def bucket_name_for_backend(storage_backend: str) -> str | None:
 
 
 def main():
+    """Load configuration and run ingest for each requested date."""
     load_dotenv()
 
+    # Read runtime configuration from .env or the shell environment.
     storage_backend = normalize_storage_backend(env_value("STORAGE_BACKEND") or "gcs")
     bucket_name = bucket_name_for_backend(storage_backend)
     gcs_prefix = env_value("STORAGE_PREFIX") or env_value("GCS_PREFIX") or "vote"
