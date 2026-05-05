@@ -207,3 +207,23 @@ def test_bucket_name_for_backend_uses_backend_specific_env_var(ingest, monkeypat
 
     assert ingest.bucket_name_for_backend("gcs") == "gcs-bucket"
     assert ingest.bucket_name_for_backend("s3") == "s3-bucket"
+
+
+def test_s3_bucket_name_can_include_endpoint_url(ingest, monkeypatch):
+    monkeypatch.setenv("S3_BUCKET_NAME", "http://10.11.1.171:30080/raw-ingest")
+
+    assert ingest.bucket_name_for_backend("s3") == "raw-ingest"
+    assert ingest.s3_endpoint_url() == "http://10.11.1.171:30080"
+
+
+def test_s3_endpoint_url_env_takes_precedence(ingest, monkeypatch):
+    monkeypatch.setenv("S3_ENDPOINT_URL", "http://10.11.1.171:30080/")
+    monkeypatch.setenv("S3_BUCKET_NAME", "raw-ingest")
+
+    assert ingest.bucket_name_for_backend("s3") == "raw-ingest"
+    assert ingest.s3_endpoint_url() == "http://10.11.1.171:30080"
+
+
+def test_s3_bucket_url_must_point_to_one_bucket(ingest):
+    with pytest.raises(ValueError, match="http://host:port/bucket-name"):
+        ingest.split_s3_bucket_config("http://10.11.1.171:30080/path/to/raw-ingest")
