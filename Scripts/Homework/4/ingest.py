@@ -15,6 +15,14 @@ from dotenv import load_dotenv
 from google.cloud import storage
 
 SUPPORTED_STORAGE_BACKENDS = {"gcs", "s3"}
+TRUE_VALUES = {"1", "true", "yes", "y", "on"}
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in TRUE_VALUES
 
 
 def sha256sum(file_path: Path) -> str:
@@ -73,6 +81,11 @@ def s3_credentials() -> dict[str, str]:
     if bool(access_key) != bool(secret_key):
         raise ValueError("Both CEPH_ACCESS_KEY and CEPH_SECRET_KEY are required for Ceph S3 authentication.")
     if not access_key:
+        if s3_endpoint_url() and not env_flag("S3_ALLOW_ANONYMOUS"):
+            raise ValueError(
+                "CEPH_ACCESS_KEY and CEPH_SECRET_KEY are required when using a custom S3/Ceph endpoint. "
+                "Set both values in .env, or set S3_ALLOW_ANONYMOUS=true only if this bucket intentionally allows anonymous writes."
+            )
         return {}
 
     return {
@@ -141,6 +154,9 @@ def object_exists(storage_backend: str, bucket_name: str, object_path: str) -> b
         client = gcs_client()
         return client.bucket(bucket_name).blob(object_path).exists(client)
 
+    if env_flag("S3_SKIP_EXISTS_CHECK"):
+        return False
+
     try:
         s3_client().head_object(Bucket=bucket_name, Key=object_path)
         return True
@@ -148,6 +164,12 @@ def object_exists(storage_backend: str, bucket_name: str, object_path: str) -> b
         error_code = e.response.get("Error", {}).get("Code")
         if error_code in {"404", "NoSuchKey", "NotFound"}:
             return False
+        if error_code in {"403", "AccessDenied"}:
+            raise PermissionError(
+                "Ceph/S3 denied HeadObject while checking whether the object already exists. "
+                "Verify CEPH_ACCESS_KEY and CEPH_SECRET_KEY. If the key can write objects but cannot head/read them, "
+                "set S3_SKIP_EXISTS_CHECK=true to upload without the pre-check."
+            ) from e
         raise
 
 
