@@ -25,6 +25,14 @@ def env_flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in TRUE_VALUES
 
 
+def env_value(name: str) -> str | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
 def sha256sum(file_path: Path) -> str:
     h = hashlib.sha256()
     with open(file_path, "rb") as f:
@@ -62,11 +70,11 @@ def split_s3_bucket_config(raw_bucket_config: str) -> tuple[str | None, str]:
 
 
 def s3_endpoint_url() -> str | None:
-    explicit_endpoint = os.getenv("S3_ENDPOINT_URL")
+    explicit_endpoint = env_value("S3_ENDPOINT_URL")
     if explicit_endpoint:
         return explicit_endpoint.rstrip("/")
 
-    raw_bucket_config = os.getenv("S3_BUCKET_NAME")
+    raw_bucket_config = env_value("S3_BUCKET_NAME")
     if not raw_bucket_config:
         return None
 
@@ -75,8 +83,8 @@ def s3_endpoint_url() -> str | None:
 
 
 def s3_credentials() -> dict[str, str]:
-    access_key = os.getenv("CEPH_ACCESS_KEY") or os.getenv("AWS_ACCESS_KEY_ID")
-    secret_key = os.getenv("CEPH_SECRET_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY")
+    access_key = env_value("CEPH_ACCESS_KEY") or env_value("AWS_ACCESS_KEY_ID")
+    secret_key = env_value("CEPH_SECRET_KEY") or env_value("AWS_SECRET_ACCESS_KEY")
 
     if bool(access_key) != bool(secret_key):
         raise ValueError("Both CEPH_ACCESS_KEY and CEPH_SECRET_KEY are required for Ceph S3 authentication.")
@@ -137,8 +145,8 @@ def gcs_client() -> storage.Client:
 def s3_client():
     client_kwargs = {
         "config": Config(
-            signature_version=os.getenv("S3_SIGNATURE_VERSION", "s3v4"),
-            s3={"addressing_style": os.getenv("S3_ADDRESSING_STYLE", "path")},
+            signature_version=env_value("S3_SIGNATURE_VERSION") or "s3v4",
+            s3={"addressing_style": env_value("S3_ADDRESSING_STYLE") or "path"},
         )
     }
     endpoint_url = s3_endpoint_url()
@@ -369,9 +377,9 @@ def run_cycle(
 def bucket_name_for_backend(storage_backend: str) -> str | None:
     backend = normalize_storage_backend(storage_backend)
     if backend == "gcs":
-        return os.getenv("GCS_BUCKET_NAME")
+        return env_value("GCS_BUCKET_NAME")
 
-    raw_bucket_config = os.getenv("S3_BUCKET_NAME")
+    raw_bucket_config = env_value("S3_BUCKET_NAME")
     if not raw_bucket_config:
         return None
     _, bucket_name = split_s3_bucket_config(raw_bucket_config)
@@ -379,16 +387,16 @@ def bucket_name_for_backend(storage_backend: str) -> str | None:
 
 
 def main():
-    load_dotenv()
+    load_dotenv(override=True)
 
-    storage_backend = normalize_storage_backend(os.getenv("STORAGE_BACKEND", "gcs"))
+    storage_backend = normalize_storage_backend(env_value("STORAGE_BACKEND") or "gcs")
     bucket_name = bucket_name_for_backend(storage_backend)
-    gcs_prefix = os.getenv("STORAGE_PREFIX", os.getenv("GCS_PREFIX", "vote"))
-    run_hour = os.getenv("RUN_HOUR", "00")
-    forecast_step = int(os.getenv("FORECAST_STEP", "3"))
-    forecast_max = int(os.getenv("FORECAST_MAX", "72"))
-    start_date = os.getenv("START_DATE")
-    end_date = os.getenv("END_DATE")
+    gcs_prefix = env_value("STORAGE_PREFIX") or env_value("GCS_PREFIX") or "vote"
+    run_hour = env_value("RUN_HOUR") or "00"
+    forecast_step = int(env_value("FORECAST_STEP") or "3")
+    forecast_max = int(env_value("FORECAST_MAX") or "72")
+    start_date = env_value("START_DATE")
+    end_date = env_value("END_DATE")
 
     if not bucket_name:
         bucket_env_var = "GCS_BUCKET_NAME" if storage_backend == "gcs" else "S3_BUCKET_NAME"
