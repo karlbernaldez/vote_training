@@ -227,3 +227,55 @@ def test_s3_endpoint_url_env_takes_precedence(ingest, monkeypatch):
 def test_s3_bucket_url_must_point_to_one_bucket(ingest):
     with pytest.raises(ValueError, match="http://host:port/bucket-name"):
         ingest.split_s3_bucket_config("http://10.11.1.171:30080/path/to/raw-ingest")
+
+
+def test_s3_credentials_use_ceph_env_vars(ingest, monkeypatch):
+    monkeypatch.setenv("CEPH_ACCESS_KEY", "access-value")
+    monkeypatch.setenv("CEPH_SECRET_KEY", "credential-value")
+
+    assert ingest.s3_credentials() == {
+        "aws_access_key_id": "access-value",
+        "aws_secret_access_key": "credential-value",
+    }
+
+
+def test_s3_credentials_can_fallback_to_aws_env_vars(ingest, monkeypatch):
+    monkeypatch.delenv("CEPH_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("CEPH_SECRET_KEY", raising=False)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "access-value")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "credential-value")
+
+    assert ingest.s3_credentials() == {
+        "aws_access_key_id": "access-value",
+        "aws_secret_access_key": "credential-value",
+    }
+
+
+def test_s3_credentials_require_both_values(ingest, monkeypatch):
+    monkeypatch.setenv("CEPH_ACCESS_KEY", "access-value")
+    monkeypatch.delenv("CEPH_SECRET_KEY", raising=False)
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="Both CEPH_ACCESS_KEY and CEPH_SECRET_KEY"):
+        ingest.s3_credentials()
+
+
+def test_s3_client_uses_endpoint_credentials_and_path_style_config(ingest, monkeypatch):
+    calls = []
+
+    def fake_client(service_name, **kwargs):
+        calls.append((service_name, kwargs))
+        return object()
+
+    monkeypatch.setattr(ingest.boto3, "client", fake_client)
+    monkeypatch.setenv("S3_BUCKET_NAME", "http://10.11.1.171:30080/raw-ingest")
+    monkeypatch.setenv("CEPH_ACCESS_KEY", "access-value")
+    monkeypatch.setenv("CEPH_SECRET_KEY", "credential-value")
+
+    ingest.s3_client()
+
+    assert calls[0][0] == "s3"
+    assert calls[0][1]["endpoint_url"] == "http://10.11.1.171:30080"
+    assert calls[0][1]["aws_access_key_id"] == "access-value"
+    assert calls[0][1]["aws_secret_access_key"] == "credential-value"
+    assert calls[0][1]["config"].kwargs["s3"] == {"addressing_style": "path"}
