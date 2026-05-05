@@ -5,6 +5,7 @@ import tempfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import boto3
 import requests
@@ -29,6 +30,39 @@ def normalize_storage_backend(storage_backend: str) -> str:
         supported = ", ".join(sorted(SUPPORTED_STORAGE_BACKENDS))
         raise ValueError(f"Unsupported STORAGE_BACKEND '{storage_backend}'. Use one of: {supported}.")
     return backend
+
+
+def split_s3_bucket_config(raw_bucket_config: str) -> tuple[str | None, str]:
+    """Return (endpoint_url, bucket_name) from S3_BUCKET_NAME.
+
+    Preferred config is S3_ENDPOINT_URL=http://host:port and S3_BUCKET_NAME=bucket.
+    For convenience, S3_BUCKET_NAME=http://host:port/bucket is also accepted.
+    """
+    value = raw_bucket_config.strip()
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"}:
+        bucket_name = parsed.path.strip("/")
+        if not bucket_name or "/" in bucket_name:
+            raise ValueError(
+                "When S3_BUCKET_NAME is a URL, it must be in the form "
+                "http://host:port/bucket-name."
+            )
+        endpoint_url = f"{parsed.scheme}://{parsed.netloc}"
+        return endpoint_url, bucket_name
+    return None, value
+
+
+def s3_endpoint_url() -> str | None:
+    explicit_endpoint = os.getenv("S3_ENDPOINT_URL")
+    if explicit_endpoint:
+        return explicit_endpoint.rstrip("/")
+
+    raw_bucket_config = os.getenv("S3_BUCKET_NAME")
+    if not raw_bucket_config:
+        return None
+
+    endpoint_url, _ = split_s3_bucket_config(raw_bucket_config)
+    return endpoint_url
 
 
 def storage_uri(storage_backend: str, bucket_name: str, object_path: str) -> str:
@@ -72,6 +106,9 @@ def gcs_client() -> storage.Client:
 
 
 def s3_client():
+    endpoint_url = s3_endpoint_url()
+    if endpoint_url:
+        return boto3.client("s3", endpoint_url=endpoint_url)
     return boto3.client("s3")
 
 
@@ -288,7 +325,12 @@ def bucket_name_for_backend(storage_backend: str) -> str | None:
     backend = normalize_storage_backend(storage_backend)
     if backend == "gcs":
         return os.getenv("GCS_BUCKET_NAME")
-    return os.getenv("S3_BUCKET_NAME")
+
+    raw_bucket_config = os.getenv("S3_BUCKET_NAME")
+    if not raw_bucket_config:
+        return None
+    _, bucket_name = split_s3_bucket_config(raw_bucket_config)
+    return bucket_name
 
 
 def main():
