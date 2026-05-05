@@ -6,12 +6,14 @@ on:
       - main
       - master
       - develop
+      - ingest
       - add-ingest-manifest
   pull_request:
     branches:
       - main
       - master
       - develop
+      - ingest
 
 jobs:
   test:
