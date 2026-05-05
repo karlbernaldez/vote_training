@@ -34,26 +34,31 @@ def test_build_manifest_summarizes_ingest_log(ingest, monkeypatch):
         {
             "source": "GFS",
             "model": "WW3",
+            "storage_backend": "gcs",
             "run_time": "2026050500",
             "forecast_hour": "000",
             "format": "grib2",
             "object_path": "vote/bronze/GFS/2026/05/05/00/000/2026050500_f000.grib2",
+            "storage_uri": "gs://bucket/vote/bronze/GFS/2026/05/05/00/000/2026050500_f000.grib2",
             "gcs_uri": "gs://bucket/vote/bronze/GFS/2026/05/05/00/000/2026050500_f000.grib2",
             "status": "DOWNLOADED_AND_UPLOADED",
         },
         {
             "source": "GFS",
             "model": "WW3",
+            "storage_backend": "gcs",
             "run_time": "2026050500",
             "forecast_hour": "003",
             "format": "grib2",
             "object_path": "vote/bronze/GFS/2026/05/05/00/003/2026050500_f003.grib2",
+            "storage_uri": "gs://bucket/vote/bronze/GFS/2026/05/05/00/003/2026050500_f003.grib2",
             "gcs_uri": "gs://bucket/vote/bronze/GFS/2026/05/05/00/003/2026050500_f003.grib2",
             "status": "SKIPPED_ALREADY_EXISTS",
         },
         {
             "source": "GFS",
             "model": "WW3",
+            "storage_backend": "gcs",
             "run_time": "2026050500",
             "forecast_hour": "006",
             "format": "grib2",
@@ -71,14 +76,17 @@ def test_build_manifest_summarizes_ingest_log(ingest, monkeypatch):
         forecast_step=3,
         forecast_max=6,
         ingest_log=ingest_log,
+        storage_backend="gcs",
     )
 
     assert manifest["manifest_version"] == "1.0"
     assert manifest["generated_at"] == fixed_now.isoformat()
     assert manifest["source"] == "GFS"
     assert manifest["model"] == "WW3"
+    assert manifest["storage_backend"] == "gcs"
     assert manifest["bucket"] == "bucket"
     assert manifest["gcs_prefix"] == "vote"
+    assert manifest["storage_prefix"] == "vote"
     assert manifest["run_date"] == "2026-05-05"
     assert manifest["run_hour"] == "00"
     assert manifest["run_time"] == "2026050500"
@@ -91,10 +99,17 @@ def test_build_manifest_summarizes_ingest_log(ingest, monkeypatch):
     assert manifest["files"] == ingest_log
 
 
-def test_run_cycle_uploads_ingest_log_and_manifest(ingest, monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("storage_backend", "expected_scheme", "provider_uri_key"),
+    [
+        ("gcs", "gs", "gcs_uri"),
+        ("s3", "s3", "s3_uri"),
+    ],
+)
+def test_run_cycle_uploads_ingest_log_and_manifest(ingest, monkeypatch, storage_backend, expected_scheme, provider_uri_key):
     uploaded_json = {}
 
-    monkeypatch.setattr(ingest, "object_exists", lambda bucket_name, object_path: False)
+    monkeypatch.setattr(ingest, "object_exists", lambda backend, bucket_name, object_path: False)
 
     def fake_download_file(url, local_path, timeout=120):
         local_path.write_bytes(b"grib-data")
@@ -102,15 +117,15 @@ def test_run_cycle_uploads_ingest_log_and_manifest(ingest, monkeypatch, tmp_path
     monkeypatch.setattr(ingest, "download_file", fake_download_file)
     monkeypatch.setattr(
         ingest,
-        "upload_to_gcs",
-        lambda bucket_name, local_file, object_path: f"gs://{bucket_name}/{object_path}",
+        "upload_file",
+        lambda backend, bucket_name, local_file, object_path: f"{expected_scheme}://{bucket_name}/{object_path}",
     )
 
-    def fake_upload_json_to_gcs(bucket_name, data, object_path):
+    def fake_upload_json(backend, bucket_name, data, object_path):
         uploaded_json[object_path] = json.loads(json.dumps(data))
-        return f"gs://{bucket_name}/{object_path}"
+        return f"{expected_scheme}://{bucket_name}/{object_path}"
 
-    monkeypatch.setattr(ingest, "upload_json_to_gcs", fake_upload_json_to_gcs)
+    monkeypatch.setattr(ingest, "upload_json", fake_upload_json)
 
     cycle_log = ingest.run_cycle(
         bucket_name="bucket",
@@ -119,15 +134,76 @@ def test_run_cycle_uploads_ingest_log_and_manifest(ingest, monkeypatch, tmp_path
         run_hour="00",
         forecast_step=3,
         forecast_max=3,
+        storage_backend=storage_backend,
     )
 
     log_path = "vote/bronze/GFS/2026/05/05/00/ingest_log.json"
     manifest_path = "vote/bronze/GFS/2026/05/05/00/manifest.json"
 
     assert len(cycle_log) == 2
+    assert cycle_log[0]["storage_backend"] == storage_backend
+    assert cycle_log[0]["storage_uri"].startswith(f"{expected_scheme}://bucket/")
+    assert cycle_log[0][provider_uri_key] == cycle_log[0]["storage_uri"]
     assert uploaded_json[log_path] == cycle_log
+    assert uploaded_json[manifest_path]["storage_backend"] == storage_backend
     assert uploaded_json[manifest_path]["record_count"] == 2
     assert uploaded_json[manifest_path]["downloaded"] == 2
     assert uploaded_json[manifest_path]["skipped"] == 0
     assert uploaded_json[manifest_path]["failed"] == 0
     assert uploaded_json[manifest_path]["files"] == cycle_log
+
+
+def test_run_cycle_marks_existing_s3_objects_as_skipped(ingest, monkeypatch):
+    uploaded_json = {}
+
+    monkeypatch.setattr(ingest, "object_exists", lambda backend, bucket_name, object_path: True)
+    monkeypatch.setattr(ingest, "download_file", lambda *args, **kwargs: pytest.fail("download should not run"))
+    monkeypatch.setattr(ingest, "upload_file", lambda *args, **kwargs: pytest.fail("upload should not run"))
+
+    def fake_upload_json(backend, bucket_name, data, object_path):
+        uploaded_json[object_path] = json.loads(json.dumps(data))
+        return f"s3://{bucket_name}/{object_path}"
+
+    monkeypatch.setattr(ingest, "upload_json", fake_upload_json)
+
+    cycle_log = ingest.run_cycle(
+        bucket_name="bucket",
+        gcs_prefix="vote",
+        run_dt=datetime(2026, 5, 5),
+        run_hour="00",
+        forecast_step=3,
+        forecast_max=0,
+        storage_backend="s3",
+    )
+
+    assert cycle_log == [
+        {
+            "source": "GFS",
+            "model": "WW3",
+            "run_time": "2026050500",
+            "forecast_hour": "000",
+            "format": "grib2",
+            "object_path": "vote/bronze/GFS/2026/05/05/00/000/2026050500_f000.grib2",
+            "status": "SKIPPED_ALREADY_EXISTS",
+            "storage_backend": "s3",
+            "storage_uri": "s3://bucket/vote/bronze/GFS/2026/05/05/00/000/2026050500_f000.grib2",
+            "s3_uri": "s3://bucket/vote/bronze/GFS/2026/05/05/00/000/2026050500_f000.grib2",
+        }
+    ]
+    manifest_path = "vote/bronze/GFS/2026/05/05/00/manifest.json"
+    assert uploaded_json[manifest_path]["downloaded"] == 0
+    assert uploaded_json[manifest_path]["skipped"] == 1
+    assert uploaded_json[manifest_path]["failed"] == 0
+
+
+def test_storage_backend_validation_rejects_unknown_backend(ingest):
+    with pytest.raises(ValueError, match="Unsupported STORAGE_BACKEND"):
+        ingest.normalize_storage_backend("azure")
+
+
+def test_bucket_name_for_backend_uses_backend_specific_env_var(ingest, monkeypatch):
+    monkeypatch.setenv("GCS_BUCKET_NAME", "gcs-bucket")
+    monkeypatch.setenv("S3_BUCKET_NAME", "s3-bucket")
+
+    assert ingest.bucket_name_for_backend("gcs") == "gcs-bucket"
+    assert ingest.bucket_name_for_backend("s3") == "s3-bucket"
