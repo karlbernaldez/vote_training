@@ -31,7 +31,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest requests python-dotenv google-cloud-storage
+          pip install pytest requests python-dotenv google-cloud-storage boto3
 
       - name: Run tests
         run: pytest -q
