@@ -1,4 +1,4 @@
-# WW3 GFS Ingestion Setup Guide
+# WW3 GFS Ingestion Setup Guide.
 
 This guide helps:
 - get the project from GitHub to their local machine
