@@ -9,6 +9,8 @@ __pycache__/
 # Environment and secrets
 Scripts/Homework/4/.env
 .env
+Scripts/Homework/4/wavelab-489808-3947db1b89fb.json
+Scripts/Homework/4/wavelab-489808-709da7d35394.json
 
 # Service account keys and local secrets
 keys/

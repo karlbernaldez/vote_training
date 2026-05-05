@@ -26,7 +26,7 @@ Where:
 
 ```mermaid
 flowchart LR
-    A[Storage Backend<br/>s3 or gs] --> B[Bucket<br/>raw-ingest]
+    A[Storage Backend<br/>s3 or gs] --> B[Bucket<br/>raw-ingest or votewave]
     B --> C[Storage Prefix<br/>WaveWatchIII]
     C --> D[Lake Layer<br/>bronze]
     D --> E[Source<br/>GFS]
