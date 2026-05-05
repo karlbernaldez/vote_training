@@ -24,3 +24,23 @@ if "google" not in sys.modules:
     sys.modules["google"] = google_module
     sys.modules["google.cloud"] = cloud_module
     sys.modules["google.cloud.storage"] = storage_module
+
+if "boto3" not in sys.modules:
+    boto3_module = types.ModuleType("boto3")
+    boto3_module.client = lambda *args, **kwargs: None
+    sys.modules["boto3"] = boto3_module
+
+if "botocore" not in sys.modules:
+    botocore_module = types.ModuleType("botocore")
+    exceptions_module = types.ModuleType("botocore.exceptions")
+
+    class ClientError(Exception):
+        def __init__(self, error_response, operation_name):
+            self.response = error_response
+            self.operation_name = operation_name
+            super().__init__(str(error_response))
+
+    exceptions_module.ClientError = ClientError
+    botocore_module.exceptions = exceptions_module
+    sys.modules["botocore"] = botocore_module
+    sys.modules["botocore.exceptions"] = exceptions_module
