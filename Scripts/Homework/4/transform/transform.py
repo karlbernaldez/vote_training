@@ -10,9 +10,15 @@ from dotenv import load_dotenv
 
 from ingest import daterange, normalize_storage_backend, sha256sum, storage_uri, upload_json
 from transform.config import TransformConfig, load_transform_config
-from transform.paths import merge_output_paths, source_object_path, station_wind_output_paths
+from transform.paths import (
+    gridded_wind_output_paths,
+    merge_output_paths,
+    source_object_path,
+    station_wind_output_paths,
+)
 from transform.storage import download_object, upload_binary
 from transform.wind import (
+    build_gridded_wind_dataset,
     build_station_wind_dataframe,
     build_station_wind_ml_dataframe,
     extract_wind,
@@ -265,36 +271,137 @@ def transform_station_wind(
         return manifest
 
 
+def transform_gridded_wind(
+    storage_backend: str,
+    bucket_name: str,
+    prefix: str,
+    run_dt: datetime,
+    run_hour: str,
+    forecast_start: int,
+    forecast_step: int,
+    forecast_max: int,
+) -> dict[str, Any]:
+    """Create a grid-native NetCDF wind dataset for 2D/3D CNN preparation."""
+    backend = normalize_storage_backend(storage_backend)
+    ymdh = f"{run_dt:%Y%m%d}{run_hour}"
+    netcdf_object_path, manifest_object_path = gridded_wind_output_paths(
+        prefix,
+        run_dt,
+        run_hour,
+        forecast_start,
+        forecast_max,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        local_paths, source_records = download_forecast_files(
+            backend,
+            bucket_name,
+            prefix,
+            run_dt,
+            run_hour,
+            forecast_start,
+            forecast_step,
+            forecast_max,
+            tmpdir_path,
+        )
+
+        ds = load_wind_dataset(local_paths)
+        try:
+            gridded_wind = build_gridded_wind_dataset(ds, run_time=ymdh)
+            netcdf_path = tmpdir_path / f"{ymdh}_gridded_wind_f{forecast_start:03d}-f{forecast_max:03d}.nc"
+            gridded_wind.to_netcdf(netcdf_path)
+        finally:
+            ds.close()
+            if "gridded_wind" in locals():
+                gridded_wind.close()
+
+        netcdf_uri = upload_binary(
+            backend,
+            bucket_name,
+            netcdf_path,
+            netcdf_object_path,
+            content_type="application/x-netcdf",
+        )
+
+        manifest = build_base_manifest(
+            "gridded_wind_netcdf",
+            backend,
+            bucket_name,
+            prefix,
+            run_dt,
+            run_hour,
+            forecast_start,
+            forecast_step,
+            forecast_max,
+            source_records,
+        )
+        manifest.update({
+            "netcdf_uri": netcdf_uri,
+            "netcdf_object_path": netcdf_object_path,
+            "netcdf_file_size": netcdf_path.stat().st_size,
+            "netcdf_checksum_sha256": sha256sum(netcdf_path),
+            "grid_dims": dict(gridded_wind.sizes),
+            "grid_variables": list(gridded_wind.data_vars),
+            "cnn_layout_options": {
+                "conv2d": "N x C x H x W, one forecast hour per sample",
+                "conv3d": "N x C x T x H x W, one run sequence per sample",
+            },
+        })
+
+        manifest_uri = upload_json(backend, bucket_name, manifest, manifest_object_path)
+        manifest["manifest_uri"] = manifest_uri
+        print(f"Uploaded gridded wind NetCDF: {netcdf_uri}")
+        print(f"Uploaded manifest: {manifest_uri}")
+        return manifest
+
+
+def run_one_transform_mode(config: TransformConfig, run_dt: datetime, transform_mode: str) -> dict[str, Any]:
+    if transform_mode == "station_wind":
+        if config.stations_csv is None:
+            raise ValueError("stations_csv is required for station_wind transform")
+        return transform_station_wind(
+            config.storage_backend,
+            config.bucket_name,
+            config.prefix,
+            run_dt,
+            config.run_hour,
+            config.forecast_start,
+            config.forecast_step,
+            config.forecast_max,
+            config.stations_csv,
+        )
+
+    if transform_mode == "gridded_wind":
+        return transform_gridded_wind(
+            config.storage_backend,
+            config.bucket_name,
+            config.prefix,
+            run_dt,
+            config.run_hour,
+            config.forecast_start,
+            config.forecast_step,
+            config.forecast_max,
+        )
+
+    return merge_forecast_hours(
+        config.storage_backend,
+        config.bucket_name,
+        config.prefix,
+        run_dt,
+        config.run_hour,
+        config.forecast_start,
+        config.forecast_step,
+        config.forecast_max,
+    )
+
+
 def run_transform(config: TransformConfig) -> list[dict[str, Any]]:
-    """Run the configured transform for every requested date."""
+    """Run the configured transform mode(s) for every requested date."""
     manifests = []
     for run_dt in daterange(config.start_date, config.end_date):
-        if config.transform_mode == "station_wind":
-            if config.stations_csv is None:
-                raise ValueError("stations_csv is required for station_wind transform")
-            manifest = transform_station_wind(
-                config.storage_backend,
-                config.bucket_name,
-                config.prefix,
-                run_dt,
-                config.run_hour,
-                config.forecast_start,
-                config.forecast_step,
-                config.forecast_max,
-                config.stations_csv,
-            )
-        else:
-            manifest = merge_forecast_hours(
-                config.storage_backend,
-                config.bucket_name,
-                config.prefix,
-                run_dt,
-                config.run_hour,
-                config.forecast_start,
-                config.forecast_step,
-                config.forecast_max,
-            )
-        manifests.append(manifest)
+        for transform_mode in config.transform_modes:
+            manifests.append(run_one_transform_mode(config, run_dt, transform_mode))
     return manifests
 
 
