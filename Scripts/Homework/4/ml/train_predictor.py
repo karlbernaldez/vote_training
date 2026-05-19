@@ -30,7 +30,7 @@ def load_targets(target_csv: Path, target_columns: list[str]) -> torch.Tensor:
     missing = set(target_columns) - set(targets.columns)
     if missing:
         raise ValueError(f"Target CSV is missing target columns: {sorted(missing)}")
-    y = targets[target_columns].to_numpy(dtype=np.float32)
+    y = targets[target_columns].to_numpy(dtype=np.float32).copy()
     if np.isnan(y).any():
         raise ValueError("Target CSV contains NaN values in target columns.")
     return torch.from_numpy(y)
