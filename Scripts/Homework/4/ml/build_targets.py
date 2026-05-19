@@ -15,6 +15,15 @@ DEFAULT_TARGETS = [
     "strong_wind_event",
 ]
 
+SUPPORTED_TARGETS = {
+    "max_wind_speed_kph",
+    "mean_wind_speed_kph",
+    "p95_wind_speed_kph",
+    "strong_wind_event",
+    "final_step_mean_wind_speed_kph",
+    "final_step_max_wind_speed_kph",
+}
+
 
 def load_dataset_manifest(dataset_dir: Path) -> dict:
     manifest_path = dataset_dir / "dataset_manifest.json"
@@ -70,6 +79,10 @@ def build_targets_from_tensor(
     with observed labels when available.
     """
     targets = targets or DEFAULT_TARGETS
+    unknown = set(targets) - SUPPORTED_TARGETS
+    if unknown:
+        raise ValueError(f"Unknown target definition(s): {sorted(unknown)}")
+
     layout = validate_supported_layout(X, manifest)
     speed_index = wind_speed_channel_index(manifest)
     wind_speed = X[:, speed_index]
@@ -95,10 +108,6 @@ def build_targets_from_tensor(
             if layout not in {"conv3d", "station_conv1d"}:
                 raise ValueError("final_step_max_wind_speed_kph requires a time/forecast dimension.")
             row["final_step_max_wind_speed_kph"] = float(np.max(sample_speed[-1]))
-
-        unknown = set(targets) - set(row) - {"final_step_mean_wind_speed_kph", "final_step_max_wind_speed_kph"}
-        if unknown:
-            raise ValueError(f"Unknown target definition(s): {sorted(unknown)}")
 
         rows.append(row)
 
