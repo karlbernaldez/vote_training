@@ -1,0 +1,65 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ww3-ingest-transform
+spec:
+  # Runs hourly. The pipeline exits successfully when today's source data is not available yet.
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: pipeline
+              image: vote-ingest-pipeline:latest
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: STORAGE_BACKEND
+                  value: "s3"
+                - name: S3_BUCKET_NAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: ww3-storage-secret
+                      key: s3_bucket_name
+                - name: CEPH_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: ww3-storage-secret
+                      key: ceph_access_key
+                - name: CEPH_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: ww3-storage-secret
+                      key: ceph_secret_key
+                - name: STORAGE_PREFIX
+                  value: "WaveWatchIII"
+                - name: RUN_HOUR
+                  value: "00"
+                - name: FORECAST_START
+                  value: "0"
+                - name: FORECAST_STEP
+                  value: "3"
+                - name: FORECAST_MAX
+                  value: "72"
+                - name: AVAILABILITY_FORECAST_HOUR
+                  value: "72"
+                - name: S3_SKIP_EXISTS_CHECK
+                  value: "true"
+                - name: S3_ADDRESSING_STYLE
+                  value: "path"
+                - name: S3_SIGNATURE_VERSION
+                  value: "s3v4"
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: "1Gi"
+                  ephemeral-storage: "10Gi"
+                limits:
+                  cpu: "2"
+                  memory: "4Gi"
+                  ephemeral-storage: "30Gi"
