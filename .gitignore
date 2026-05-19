@@ -15,3 +15,4 @@ pipeline.log
 
 # Service account keys and local secrets
 keys/
+venv/
