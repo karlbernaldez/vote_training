@@ -19,6 +19,44 @@ The ingest/pipeline Docker image does not install PyTorch by default. For ML tra
 pip install -r requirements-ml.txt
 ```
 
+## Collect existing gridded outputs from your bucket
+
+List matching `gridded_wind` NetCDF files without downloading:
+
+```bash
+python -m ml.collect_bucket_dataset \
+  --storage-backend gcs \
+  --dry-run
+```
+
+Download a small training cache from the bucket:
+
+```bash
+python -m ml.collect_bucket_dataset \
+  --storage-backend gcs \
+  --output-dir data/ml/bucket_gridded_wind \
+  --max-files 30
+```
+
+If your objects live under a custom prefix, pass it explicitly:
+
+```bash
+python -m ml.collect_bucket_dataset \
+  --storage-backend gcs \
+  --bucket "$GCS_BUCKET_NAME" \
+  --prefix vote/silver/GFS/ \
+  --output-dir data/ml/bucket_gridded_wind
+```
+
+Then prepare a Conv3D training tensor from the downloaded files:
+
+```bash
+python -m ml.prepare_grid_dataset \
+  --input data/ml/bucket_gridded_wind/*.nc \
+  --output-dir data/ml/gridded_wind_conv3d_many \
+  --layout conv3d
+```
+
 ## Station dataset: Conv1d
 
 Use station ML CSV files:
