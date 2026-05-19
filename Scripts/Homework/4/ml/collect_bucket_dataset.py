@@ -62,11 +62,25 @@ def list_bucket_gridded_wind_objects(storage_backend: str, bucket_name: str, pre
 
 def local_name_for_object(object_name: str) -> str:
     parts = object_name.split("/")
-    # Keep date/hour/range context if the object follows silver/GFS/YYYY/MM/DD/HH/gridded_wind/range/file.nc.
-    if len(parts) >= 10:
-        yyyy, mm, dd, hh, hour_range, filename = parts[-8], parts[-7], parts[-6], parts[-5], parts[-2], parts[-1]
-        return f"{yyyy}{mm}{dd}{hh}_{hour_range}_{filename}"
-    return parts[-1]
+    filename = parts[-1]
+
+    # Expected shape:
+    # <prefix>/silver/GFS/YYYY/MM/DD/HH/gridded_wind/f000-f072/file.nc
+    try:
+        gfs_index = parts.index("GFS")
+        yyyy = parts[gfs_index + 1]
+        mm = parts[gfs_index + 2]
+        dd = parts[gfs_index + 3]
+        hh = parts[gfs_index + 4]
+        transform_name = parts[gfs_index + 5]
+        hour_range = parts[gfs_index + 6]
+    except (ValueError, IndexError):
+        return filename
+
+    if transform_name != "gridded_wind":
+        return filename
+
+    return f"{yyyy}{mm}{dd}{hh}_{hour_range}_{filename}"
 
 
 def download_bucket_objects(
