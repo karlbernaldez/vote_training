@@ -8,6 +8,10 @@ class Conv3dAutoencoder(nn.Module):
     """Small 3-layer Conv3D autoencoder for gridded wind pretraining.
 
     Input/output shape: batch x channels x time x height x width.
+
+    The pooling layers use ceil_mode=True so odd latitude/longitude grids, such
+    as 221 x 321, decode to a size that can be safely cropped back to the exact
+    original grid shape.
     """
 
     def __init__(self, in_channels: int, latent_channels: int = 32) -> None:
@@ -15,10 +19,10 @@ class Conv3dAutoencoder(nn.Module):
         self.encoder = nn.Sequential(
             nn.Conv3d(in_channels, 16, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.MaxPool3d(kernel_size=(1, 2, 2)),
+            nn.MaxPool3d(kernel_size=(1, 2, 2), ceil_mode=True),
             nn.Conv3d(16, 24, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.MaxPool3d(kernel_size=(1, 2, 2)),
+            nn.MaxPool3d(kernel_size=(1, 2, 2), ceil_mode=True),
             nn.Conv3d(24, latent_channels, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
         )
