@@ -3,3 +3,7 @@ python-dotenv
 google-cloud-storage
 boto3
 pytest
+numpy
+pandas
+xarray
+cfgrib
