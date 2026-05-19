@@ -17,7 +17,7 @@ log() {
 usage() {
   cat <<'EOF'
 Usage:
-  DAYS=10 GCP_KEY_PATH=/path/to/key.json ./backfill-pipeline.sh gcs
+  DAYS=10 GCP_KEY_PATH=/path/to/key.json bash ./backfill-pipeline.sh gcs
 
 Environment variables:
   DAYS                 Number of dates to backfill. Default: 10.
@@ -48,8 +48,8 @@ if ! [[ "$START_OFFSET_DAYS" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-if [ ! -x "$PIPELINE_SCRIPT" ]; then
-  log "Pipeline script is missing or not executable: $PIPELINE_SCRIPT"
+if [ ! -f "$PIPELINE_SCRIPT" ]; then
+  log "Pipeline script is missing: $PIPELINE_SCRIPT"
   exit 1
 fi
 
@@ -64,7 +64,7 @@ for offset in $(seq "$START_OFFSET_DAYS" $((START_OFFSET_DAYS + DAYS - 1))); do
   TRANSFORM_MODE="$TRANSFORM_MODE" \
   IMAGE="$IMAGE" \
   ENV_FILE="$ENV_FILE" \
-  "$PIPELINE_SCRIPT" "$BACKEND"
+  bash "$PIPELINE_SCRIPT" "$BACKEND"
 
   log "Backfill date finished run_date=$run_date run_hour=$RUN_HOUR backend=$BACKEND"
 done
