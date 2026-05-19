@@ -56,7 +56,12 @@ def load_wind_dataset(local_paths: list[Path]) -> xr.Dataset:
     if not datasets:
         raise ValueError("No readable GFS wind GRIB2 files were found for station wind transform.")
 
-    return xr.concat(datasets, dim="step")
+    return xr.concat(
+        datasets,
+        dim="step",
+        coords="minimal",
+        compat="override",
+    )
 
 
 def wind_direction_labels(direction_deg: np.ndarray) -> list[str | None]:
