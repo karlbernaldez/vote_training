@@ -12,7 +12,8 @@ from ingest import (
     normalize_storage_backend,
     run_cycle,
 )
-from transform import merge_forecast_hours, transform_station_wind
+from transform import merge_forecast_hours, transform_gridded_wind, transform_station_wind
+from transform.modes import format_transform_modes, parse_transform_modes
 
 
 def current_run_date() -> datetime:
@@ -48,11 +49,8 @@ def selected_storage_backends() -> list[str]:
     return backends
 
 
-def selected_transform_mode() -> str:
-    transform_mode = (env_value("TRANSFORM_MODE") or "merge").strip().lower()
-    if transform_mode not in {"merge", "station_wind"}:
-        raise ValueError("TRANSFORM_MODE must be either 'merge' or 'station_wind'")
-    return transform_mode
+def selected_transform_modes() -> list[str]:
+    return parse_transform_modes(env_value("TRANSFORM_MODE") or "merge")
 
 
 def prefix_for_backend(storage_backend: str) -> str:
@@ -92,11 +90,11 @@ def validate_backend_config(storage_backends: list[str]) -> None:
             )
 
 
-def validate_transform_config(transform_mode: str) -> None:
-    if transform_mode == "station_wind":
+def validate_transform_config(transform_modes: list[str]) -> None:
+    if "station_wind" in transform_modes:
         stations_csv = env_value("STATIONS_CSV")
         if not stations_csv:
-            raise ValueError("STATIONS_CSV is required when TRANSFORM_MODE=station_wind")
+            raise ValueError("STATIONS_CSV is required when TRANSFORM_MODE includes station_wind")
         if not Path(stations_csv).is_file():
             raise FileNotFoundError(f"STATIONS_CSV does not exist inside this runtime: {stations_csv}")
 
@@ -119,7 +117,7 @@ def source_is_available(run_dt: datetime, run_hour: str, forecast_hour: int, tim
 
 
 def run_transform_stage(
-    transform_mode: str,
+    transform_modes: list[str],
     storage_backend: str,
     bucket_name: str,
     prefix: str,
@@ -129,11 +127,38 @@ def run_transform_stage(
     forecast_step: int,
     forecast_max: int,
 ) -> None:
-    if transform_mode == "station_wind":
-        stations_csv = env_value("STATIONS_CSV")
-        if not stations_csv:
-            raise ValueError("STATIONS_CSV is required when TRANSFORM_MODE=station_wind")
-        transform_station_wind(
+    for transform_mode in transform_modes:
+        if transform_mode == "station_wind":
+            stations_csv = env_value("STATIONS_CSV")
+            if not stations_csv:
+                raise ValueError("STATIONS_CSV is required when TRANSFORM_MODE includes station_wind")
+            transform_station_wind(
+                storage_backend,
+                bucket_name,
+                prefix,
+                run_dt,
+                run_hour,
+                forecast_start,
+                forecast_step,
+                forecast_max,
+                Path(stations_csv),
+            )
+            continue
+
+        if transform_mode == "gridded_wind":
+            transform_gridded_wind(
+                storage_backend,
+                bucket_name,
+                prefix,
+                run_dt,
+                run_hour,
+                forecast_start,
+                forecast_step,
+                forecast_max,
+            )
+            continue
+
+        merge_forecast_hours(
             storage_backend,
             bucket_name,
             prefix,
@@ -142,25 +167,12 @@ def run_transform_stage(
             forecast_start,
             forecast_step,
             forecast_max,
-            Path(stations_csv),
         )
-        return
-
-    merge_forecast_hours(
-        storage_backend,
-        bucket_name,
-        prefix,
-        run_dt,
-        run_hour,
-        forecast_start,
-        forecast_step,
-        forecast_max,
-    )
 
 
 def run_backend_pipeline(
     storage_backend: str,
-    transform_mode: str,
+    transform_modes: list[str],
     run_dt: datetime,
     run_hour: str,
     forecast_start: int,
@@ -169,6 +181,7 @@ def run_backend_pipeline(
 ) -> bool:
     bucket_name = bucket_name_for_backend(storage_backend)
     prefix = prefix_for_backend(storage_backend)
+    transform_mode_label = format_transform_modes(transform_modes)
 
     if not bucket_name:
         bucket_env_var = "GCS_BUCKET_NAME" if storage_backend == "gcs" else "S3_BUCKET_NAME"
@@ -185,7 +198,7 @@ def run_backend_pipeline(
             "forecast_start": forecast_start,
             "forecast_step": forecast_step,
             "forecast_max": forecast_max,
-            "transform_mode": transform_mode,
+            "transform_modes": transform_modes,
         },
     )
 
@@ -208,9 +221,9 @@ def run_backend_pipeline(
         )
         return False
 
-    print(f"Ingest completed successfully for backend={storage_backend}. Running transform mode={transform_mode}...")
+    print(f"Ingest completed successfully for backend={storage_backend}. Running transform modes={transform_mode_label}...")
     run_transform_stage(
-        transform_mode,
+        transform_modes,
         storage_backend,
         bucket_name,
         prefix,
@@ -228,9 +241,9 @@ def main() -> int:
     load_dotenv()
 
     storage_backends = selected_storage_backends()
-    transform_mode = selected_transform_mode()
+    transform_modes = selected_transform_modes()
     validate_backend_config(storage_backends)
-    validate_transform_config(transform_mode)
+    validate_transform_config(transform_modes)
 
     run_hour = env_value("RUN_HOUR") or "00"
     forecast_start = int(env_value("FORECAST_START") or "0")
@@ -248,7 +261,7 @@ def main() -> int:
         "Pipeline config:",
         {
             "storage_backends": storage_backends,
-            "transform_mode": transform_mode,
+            "transform_modes": transform_modes,
             "run_date": run_dt.strftime("%Y-%m-%d"),
             "run_hour": run_hour,
             "forecast_start": forecast_start,
@@ -273,7 +286,7 @@ def main() -> int:
         results.append(
             run_backend_pipeline(
                 storage_backend,
-                transform_mode,
+                transform_modes,
                 run_dt,
                 run_hour,
                 forecast_start,

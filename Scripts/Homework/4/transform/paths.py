@@ -53,3 +53,22 @@ def station_wind_output_paths(
         f"{base_path}/{ymdh}_station_wind_ml_{hour_range}.csv",
         f"{base_path}/transform_manifest.json",
     )
+
+
+def gridded_wind_output_paths(
+    prefix: str,
+    run_dt: datetime,
+    run_hour: str,
+    start_hour: int,
+    end_hour: int,
+) -> tuple[str, str]:
+    yyyy = run_dt.strftime("%Y")
+    mm = run_dt.strftime("%m")
+    dd = run_dt.strftime("%d")
+    ymdh = f"{yyyy}{mm}{dd}{run_hour}"
+    hour_range = hour_range_label(start_hour, end_hour)
+    base_path = f"{prefix}/silver/GFS/{yyyy}/{mm}/{dd}/{run_hour}/gridded_wind/{hour_range}"
+    return (
+        f"{base_path}/{ymdh}_gridded_wind_{hour_range}.nc",
+        f"{base_path}/transform_manifest.json",
+    )

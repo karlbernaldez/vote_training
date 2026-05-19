@@ -54,14 +54,54 @@ def load_wind_dataset(local_paths: list[Path]) -> xr.Dataset:
             datasets.append(ds)
 
     if not datasets:
-        raise ValueError("No readable GFS wind GRIB2 files were found for station wind transform.")
+        raise ValueError("No readable GFS wind GRIB2 files were found for wind transform.")
 
     return xr.concat(
         datasets,
         dim="step",
+        data_vars="all",
         coords="minimal",
         compat="override",
+        join="exact",
+        combine_attrs="override",
     )
+
+
+def build_gridded_wind_dataset(ds: xr.Dataset, run_time: str | None = None) -> xr.Dataset:
+    """Build a grid-native wind dataset suitable for 2D/3D CNN preparation.
+
+    The output preserves the latitude/longitude grid instead of interpolating to
+    stations. Forecast time remains on the step dimension so downstream ML code
+    can choose either Conv2d samples (one forecast hour per sample) or Conv3d
+    samples (one full forecast sequence per sample).
+    """
+    if "u10" not in ds or "v10" not in ds:
+        raise ValueError("Gridded wind transform requires u10 and v10 variables.")
+
+    u_values = ds["u10"].astype("float32")
+    v_values = ds["v10"].astype("float32")
+    speed_kph = np.hypot(u_values, v_values).astype("float32") * np.float32(3.6)
+    direction_deg = ((270 - np.degrees(np.arctan2(v_values, u_values))) % 360).astype("float32")
+    direction_rad = np.deg2rad(direction_deg)
+
+    grid = xr.Dataset(
+        data_vars={
+            "u10_ms": u_values,
+            "v10_ms": v_values,
+            "wind_speed_kph": speed_kph,
+            "wind_dir_deg": direction_deg,
+            "wind_dir_sin": np.sin(direction_rad).astype("float32"),
+            "wind_dir_cos": np.cos(direction_rad).astype("float32"),
+        },
+        coords=ds.coords,
+        attrs={
+            "dataset_type": "gridded_wind",
+            "cnn_layout_hint": "Use variables as channels over step x latitude x longitude.",
+        },
+    )
+    if run_time is not None:
+        grid.attrs["run_time"] = run_time
+    return grid
 
 
 def wind_direction_labels(direction_deg: np.ndarray) -> list[str | None]:

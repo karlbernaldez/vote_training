@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ingest import bucket_name_for_backend, env_value, normalize_storage_backend, parse_date
+from transform.modes import format_transform_modes, parse_transform_modes
 
 
 @dataclass(frozen=True)
@@ -18,8 +19,13 @@ class TransformConfig:
     forecast_max: int
     start_date: datetime
     end_date: datetime
-    transform_mode: str
+    transform_modes: list[str]
     stations_csv: Path | None
+
+    @property
+    def transform_mode(self) -> str:
+        """Backward-compatible string label for callers/tests that expect one mode."""
+        return format_transform_modes(self.transform_modes)
 
 
 def load_transform_config() -> TransformConfig:
@@ -32,7 +38,7 @@ def load_transform_config() -> TransformConfig:
     forecast_max = int(env_value("FORECAST_MAX") or "72")
     start_date = env_value("START_DATE")
     end_date = env_value("END_DATE")
-    transform_mode = (env_value("TRANSFORM_MODE") or "merge").strip().lower()
+    transform_modes = parse_transform_modes(env_value("TRANSFORM_MODE") or "merge")
     stations_csv_value = env_value("STATIONS_CSV")
 
     if not bucket_name:
@@ -44,10 +50,8 @@ def load_transform_config() -> TransformConfig:
         raise ValueError("FORECAST_STEP must be greater than zero")
     if forecast_max < forecast_start:
         raise ValueError("FORECAST_MAX must be greater than or equal to FORECAST_START")
-    if transform_mode not in {"merge", "station_wind"}:
-        raise ValueError("TRANSFORM_MODE must be either 'merge' or 'station_wind'")
-    if transform_mode == "station_wind" and not stations_csv_value:
-        raise ValueError("STATIONS_CSV is required when TRANSFORM_MODE=station_wind")
+    if "station_wind" in transform_modes and not stations_csv_value:
+        raise ValueError("STATIONS_CSV is required when TRANSFORM_MODE includes station_wind")
 
     stations_csv = Path(stations_csv_value) if stations_csv_value else None
     if stations_csv and not stations_csv.exists():
@@ -68,6 +72,6 @@ def load_transform_config() -> TransformConfig:
         forecast_max=forecast_max,
         start_date=start_dt,
         end_date=end_dt,
-        transform_mode=transform_mode,
+        transform_modes=transform_modes,
         stations_csv=stations_csv,
     )
