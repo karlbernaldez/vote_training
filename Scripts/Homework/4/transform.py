@@ -1,5 +1,4 @@
 import hashlib
-import json
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,7 +79,7 @@ def station_wind_output_paths(
     run_hour: str,
     start_hour: int,
     end_hour: int,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     yyyy = run_dt.strftime("%Y")
     mm = run_dt.strftime("%m")
     dd = run_dt.strftime("%d")
@@ -89,6 +88,7 @@ def station_wind_output_paths(
     base_path = f"{prefix}/silver/GFS/{yyyy}/{mm}/{dd}/{run_hour}/station_wind/{hour_range}"
     return (
         f"{base_path}/{ymdh}_station_wind_{hour_range}.csv",
+        f"{base_path}/{ymdh}_station_wind_ml_{hour_range}.csv",
         f"{base_path}/transform_manifest.json",
     )
 
@@ -109,30 +109,60 @@ def safe_open_grib(file_path: Path, backend_kwargs: dict[str, Any]) -> xr.Datase
 
 def wind_direction_labels(direction_deg: np.ndarray) -> list[str]:
     """Convert wind direction degrees into 16-point compass labels."""
-    return [
-        DIRECTIONS_16[int((direction + 11.25) / 22.5) % 16]
-        for direction in np.atleast_1d(direction_deg)
-    ]
+    labels = []
+    for direction in np.atleast_1d(direction_deg):
+        if np.isnan(direction):
+            labels.append(None)
+        else:
+            labels.append(DIRECTIONS_16[int((direction + 11.25) / 22.5) % 16])
+    return labels
+
+
+def extract_wind_features(ds: xr.Dataset, lat: float, lon: float) -> list[dict[str, Any]]:
+    """Extract ML-friendly wind features for one station point.
+
+    Wind direction is represented three ways:
+    - wind_direction: human-readable 16-point label
+    - wind_dir_deg: direction in degrees
+    - wind_dir_sin / wind_dir_cos: circular features for ML models
+    """
+    point = ds.interp(latitude=lat, longitude=lon, method="linear")
+
+    u_values = np.atleast_1d(point.u10.values).astype(float)
+    v_values = np.atleast_1d(point.v10.values).astype(float)
+    speed_kph = np.hypot(u_values, v_values) * 3.6
+    direction_deg = (270 - np.degrees(np.arctan2(v_values, u_values))) % 360
+    forecast_hours = np.atleast_1d(
+        (point.step.dt.total_seconds().values / 3600).astype(int)
+    )
+    direction_labels = wind_direction_labels(direction_deg)
+
+    records = []
+    for index, forecast_hour in enumerate(forecast_hours):
+        degree = direction_deg[index]
+        degree_rad = np.deg2rad(degree) if not np.isnan(degree) else np.nan
+        records.append({
+            "forecast_hour": int(forecast_hour),
+            "forecast_hour_label": f"f{int(forecast_hour):03d}",
+            "u10_ms": round(float(u_values[index]), 6) if not np.isnan(u_values[index]) else np.nan,
+            "v10_ms": round(float(v_values[index]), 6) if not np.isnan(v_values[index]) else np.nan,
+            "wind_speed_kph": int(round(float(speed_kph[index]))) if not np.isnan(speed_kph[index]) else np.nan,
+            "wind_dir_deg": round(float(degree), 6) if not np.isnan(degree) else np.nan,
+            "wind_dir_sin": round(float(np.sin(degree_rad)), 6) if not np.isnan(degree_rad) else np.nan,
+            "wind_dir_cos": round(float(np.cos(degree_rad)), 6) if not np.isnan(degree_rad) else np.nan,
+            "wind_direction": direction_labels[index],
+        })
+
+    return records
 
 
 def extract_wind(ds: xr.Dataset, lat: float, lon: float) -> tuple[list[int], list[int], list[str]]:
     """Extract forecast hour, wind speed in kph, and wind direction for one point."""
-    point = ds.interp(latitude=lat, longitude=lon, method="linear")
-
-    u = np.atleast_1d(point.u10.values)
-    v = np.atleast_1d(point.v10.values)
-
-    speed_kph = np.hypot(u, v) * 3.6
-    direction_deg = (270 - np.degrees(np.arctan2(v, u))) % 360
-
-    forecast_hours = np.atleast_1d(
-        (point.step.dt.total_seconds().values / 3600).astype(int)
-    )
-
+    records = extract_wind_features(ds, lat, lon)
     return (
-        forecast_hours.tolist(),
-        np.round(speed_kph).astype(int).tolist(),
-        wind_direction_labels(direction_deg),
+        [record["forecast_hour"] for record in records],
+        [record["wind_speed_kph"] for record in records],
+        [record["wind_direction"] for record in records],
     )
 
 
@@ -159,7 +189,7 @@ def load_wind_dataset(local_paths: list[Path]) -> xr.Dataset:
 
 
 def build_station_wind_dataframe(ds: xr.Dataset, stations_csv: Path) -> pd.DataFrame:
-    """Build a station-level forecast table using Nico's wind extraction logic."""
+    """Build a human-readable station-level forecast table."""
     stations = pd.read_csv(stations_csv)
     required_columns = {"lat", "lon"}
     missing_columns = required_columns - set(stations.columns)
@@ -179,6 +209,41 @@ def build_station_wind_dataframe(ds: xr.Dataset, stations_csv: Path) -> pd.DataF
             output_row[f"f{hour:03d}"] = f"{direction[index]} @ {speed[index]} kph"
 
         rows.append(output_row)
+
+    return pd.DataFrame(rows)
+
+
+def build_station_wind_ml_dataframe(
+    ds: xr.Dataset,
+    stations_csv: Path,
+    run_time: str | None = None,
+) -> pd.DataFrame:
+    """Build a long-format, numeric station wind table for ML.
+
+    Each output row represents one station and one forecast hour. This format is
+    easier for scikit-learn than wide columns like f000, f003, and f006.
+    """
+    stations = pd.read_csv(stations_csv)
+    required_columns = {"lat", "lon"}
+    missing_columns = required_columns - set(stations.columns)
+    if missing_columns:
+        raise ValueError(f"Stations CSV is missing required columns: {sorted(missing_columns)}")
+
+    rows = []
+    for _, station in stations.iterrows():
+        station_data = station.to_dict()
+        wind_records = extract_wind_features(
+            ds,
+            lat=float(station["lat"]),
+            lon=float(station["lon"]),
+        )
+
+        for wind_record in wind_records:
+            output_row = dict(station_data)
+            if run_time is not None:
+                output_row["run_time"] = run_time
+            output_row.update(wind_record)
+            rows.append(output_row)
 
     return pd.DataFrame(rows)
 
@@ -263,10 +328,10 @@ def transform_station_wind(
     forecast_max: int,
     stations_csv: Path,
 ) -> dict[str, Any]:
-    """Create station-level wind CSV output from bronze GFS GRIB2 files."""
+    """Create human-readable and ML-ready station wind CSV outputs from bronze GFS GRIB2 files."""
     backend = normalize_storage_backend(storage_backend)
     ymdh = f"{run_dt:%Y%m%d}{run_hour}"
-    csv_object_path, manifest_object_path = station_wind_output_paths(
+    human_csv_object_path, ml_csv_object_path, manifest_object_path = station_wind_output_paths(
         prefix,
         run_dt,
         run_hour,
@@ -296,12 +361,17 @@ def transform_station_wind(
         ds = load_wind_dataset(local_grib_paths)
         try:
             station_wind = build_station_wind_dataframe(ds, stations_csv)
-            csv_path = tmpdir_path / f"{ymdh}_station_wind_f{forecast_start:03d}-f{forecast_max:03d}.csv"
-            station_wind.to_csv(csv_path, index=False)
+            station_wind_ml = build_station_wind_ml_dataframe(ds, stations_csv, run_time=ymdh)
+
+            human_csv_path = tmpdir_path / f"{ymdh}_station_wind_f{forecast_start:03d}-f{forecast_max:03d}.csv"
+            ml_csv_path = tmpdir_path / f"{ymdh}_station_wind_ml_f{forecast_start:03d}-f{forecast_max:03d}.csv"
+            station_wind.to_csv(human_csv_path, index=False)
+            station_wind_ml.to_csv(ml_csv_path, index=False)
         finally:
             ds.close()
 
-        csv_uri = upload_binary(backend, bucket_name, csv_path, csv_object_path)
+        human_csv_uri = upload_binary(backend, bucket_name, human_csv_path, human_csv_object_path)
+        ml_csv_uri = upload_binary(backend, bucket_name, ml_csv_path, ml_csv_object_path)
         manifest = {
             "manifest_version": "1.0",
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -318,17 +388,24 @@ def transform_station_wind(
             "forecast_step": forecast_step,
             "forecast_max": forecast_max,
             "station_count": len(station_wind),
+            "ml_record_count": len(station_wind_ml),
             "source_count": len(source_records),
             "stations_csv": str(stations_csv),
-            "csv_uri": csv_uri,
-            "csv_object_path": csv_object_path,
-            "csv_file_size": csv_path.stat().st_size,
-            "csv_checksum_sha256": sha256sum(csv_path),
+            "human_csv_uri": human_csv_uri,
+            "human_csv_object_path": human_csv_object_path,
+            "human_csv_file_size": human_csv_path.stat().st_size,
+            "human_csv_checksum_sha256": sha256sum(human_csv_path),
+            "ml_csv_uri": ml_csv_uri,
+            "ml_csv_object_path": ml_csv_object_path,
+            "ml_csv_file_size": ml_csv_path.stat().st_size,
+            "ml_csv_checksum_sha256": sha256sum(ml_csv_path),
+            "ml_columns": list(station_wind_ml.columns),
             "sources": source_records,
         }
         manifest_uri = upload_json(backend, bucket_name, manifest, manifest_object_path)
         manifest["manifest_uri"] = manifest_uri
-        print(f"Uploaded station wind CSV: {csv_uri}")
+        print(f"Uploaded station wind CSV: {human_csv_uri}")
+        print(f"Uploaded station wind ML CSV: {ml_csv_uri}")
         print(f"Uploaded manifest: {manifest_uri}")
         return manifest
 
@@ -398,4 +475,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Keep transform.py importable for function-level tests without requiring .env values.
+    # Uncomment main() only when running the full storage-backed transform workflow.
+    # main()
+    print("transform.py loaded. Import and call transform functions from tests or the pipeline.")
