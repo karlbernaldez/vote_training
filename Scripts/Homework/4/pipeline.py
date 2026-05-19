@@ -1,4 +1,3 @@
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,7 +12,7 @@ from ingest import (
     normalize_storage_backend,
     run_cycle,
 )
-from transform import merge_forecast_hours
+from transform import merge_forecast_hours, transform_station_wind
 
 
 def current_run_date() -> datetime:
@@ -47,6 +46,13 @@ def selected_storage_backends() -> list[str]:
         if normalized_backend not in backends:
             backends.append(normalized_backend)
     return backends
+
+
+def selected_transform_mode() -> str:
+    transform_mode = (env_value("TRANSFORM_MODE") or "merge").strip().lower()
+    if transform_mode not in {"merge", "station_wind"}:
+        raise ValueError("TRANSFORM_MODE must be either 'merge' or 'station_wind'")
+    return transform_mode
 
 
 def prefix_for_backend(storage_backend: str) -> str:
@@ -86,6 +92,15 @@ def validate_backend_config(storage_backends: list[str]) -> None:
             )
 
 
+def validate_transform_config(transform_mode: str) -> None:
+    if transform_mode == "station_wind":
+        stations_csv = env_value("STATIONS_CSV")
+        if not stations_csv:
+            raise ValueError("STATIONS_CSV is required when TRANSFORM_MODE=station_wind")
+        if not Path(stations_csv).is_file():
+            raise FileNotFoundError(f"STATIONS_CSV does not exist inside this runtime: {stations_csv}")
+
+
 def source_is_available(run_dt: datetime, run_hour: str, forecast_hour: int, timeout: int = 30) -> bool:
     yyyy = run_dt.strftime("%Y")
     mm = run_dt.strftime("%m")
@@ -103,8 +118,49 @@ def source_is_available(run_dt: datetime, run_hour: str, forecast_hour: int, tim
         return False
 
 
+def run_transform_stage(
+    transform_mode: str,
+    storage_backend: str,
+    bucket_name: str,
+    prefix: str,
+    run_dt: datetime,
+    run_hour: str,
+    forecast_start: int,
+    forecast_step: int,
+    forecast_max: int,
+) -> None:
+    if transform_mode == "station_wind":
+        stations_csv = env_value("STATIONS_CSV")
+        if not stations_csv:
+            raise ValueError("STATIONS_CSV is required when TRANSFORM_MODE=station_wind")
+        transform_station_wind(
+            storage_backend,
+            bucket_name,
+            prefix,
+            run_dt,
+            run_hour,
+            forecast_start,
+            forecast_step,
+            forecast_max,
+            Path(stations_csv),
+        )
+        return
+
+    merge_forecast_hours(
+        storage_backend,
+        bucket_name,
+        prefix,
+        run_dt,
+        run_hour,
+        forecast_start,
+        forecast_step,
+        forecast_max,
+    )
+
+
 def run_backend_pipeline(
     storage_backend: str,
+    transform_mode: str,
     run_dt: datetime,
     run_hour: str,
     forecast_start: int,
@@ -129,6 +185,7 @@ def run_backend_pipeline(
             "forecast_start": forecast_start,
             "forecast_step": forecast_step,
             "forecast_max": forecast_max,
+            "transform_mode": transform_mode,
         },
     )
 
@@ -151,8 +208,9 @@ def run_backend_pipeline(
         )
         return False
 
-    print(f"Ingest completed successfully for backend={storage_backend}. Running transform...")
-    merge_forecast_hours(
+    print(f"Ingest completed successfully for backend={storage_backend}. Running transform mode={transform_mode}...")
+    run_transform_stage(
+        transform_mode,
         storage_backend,
         bucket_name,
         prefix,
@@ -170,7 +228,9 @@ def main() -> int:
     load_dotenv()
 
     storage_backends = selected_storage_backends()
+    transform_mode = selected_transform_mode()
     validate_backend_config(storage_backends)
+    validate_transform_config(transform_mode)
 
     run_hour = env_value("RUN_HOUR") or "00"
     forecast_start = int(env_value("FORECAST_START") or "0")
@@ -188,6 +248,7 @@ def main() -> int:
         "Pipeline config:",
         {
             "storage_backends": storage_backends,
+            "transform_mode": transform_mode,
             "run_date": run_dt.strftime("%Y-%m-%d"),
             "run_hour": run_hour,
             "forecast_start": forecast_start,
@@ -212,6 +273,7 @@ def main() -> int:
         results.append(
             run_backend_pipeline(
                 storage_backend,
+                transform_mode,
                 run_dt,
                 run_hour,
                 forecast_start,
