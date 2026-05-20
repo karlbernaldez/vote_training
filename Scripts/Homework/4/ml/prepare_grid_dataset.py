@@ -46,6 +46,7 @@ def read_gridded_wind_datasets(paths: Iterable[Path]) -> xr.Dataset:
             join="exact",
             combine_attrs="override",
         )
+        dataset = dataset.assign_coords(sample=np.arange(len(datasets), dtype=np.int32))
 
     dataset.attrs["source_files"] = json.dumps(source_files)
     return dataset
@@ -77,6 +78,10 @@ def forecast_hours_from_step(step_values: np.ndarray) -> list[int]:
     return hours
 
 
+def source_files_from_attrs(ds: xr.Dataset) -> list[str]:
+    return json.loads(ds.attrs.get("source_files", "[]"))
+
+
 def build_grid_cnn_dataset(
     ds: xr.Dataset,
     layout: str,
@@ -87,6 +92,10 @@ def build_grid_cnn_dataset(
     Supported layouts:
     - conv2d: X shape is N x C x H x W, one forecast hour per sample
     - conv3d: X shape is N x C x T x H x W, one run sequence per sample
+
+    When multiple NetCDF files are passed, xarray adds a `sample` dimension.
+    This function preserves that dimension for Conv3d and flattens sample/time
+    into the batch axis for Conv2d.
     """
     if layout not in SUPPORTED_LAYOUTS:
         raise ValueError(f"Unsupported layout: {layout}. Supported layouts are: {sorted(SUPPORTED_LAYOUTS)}")
@@ -94,21 +103,47 @@ def build_grid_cnn_dataset(
     feature_variables = feature_variables or DEFAULT_FEATURE_VARIABLES
     validate_gridded_dataset(ds, feature_variables)
 
-    ordered = ds[feature_variables].transpose(..., "step", "latitude", "longitude")
-    stacked = ordered.to_array(dim="channel").transpose("channel", "step", "latitude", "longitude")
-    values = stacked.to_numpy().astype(np.float32)
-
-    if np.isnan(values).any():
-        raise ValueError("Gridded dataset contains NaN values in selected feature variables.")
-
+    has_sample_dim = "sample" in ds.sizes
+    source_files = source_files_from_attrs(ds)
     forecast_hours = forecast_hours_from_step(ds["step"].values)
     latitude_count = int(ds.sizes["latitude"])
     longitude_count = int(ds.sizes["longitude"])
 
+    if has_sample_dim:
+        stacked = (
+            ds[feature_variables]
+            .to_array(dim="channel")
+            .transpose("sample", "channel", "step", "latitude", "longitude")
+        )
+        values = stacked.to_numpy().astype(np.float32)
+    else:
+        stacked = (
+            ds[feature_variables]
+            .to_array(dim="channel")
+            .transpose("channel", "step", "latitude", "longitude")
+        )
+        # Add synthetic sample dimension so downstream logic is consistent.
+        values = stacked.to_numpy().astype(np.float32)[np.newaxis, ...]
+
+    if np.isnan(values).any():
+        raise ValueError("Gridded dataset contains NaN values in selected feature variables.")
+
     if layout == "conv2d":
-        # C x T x H x W -> T x C x H x W
-        X = np.moveaxis(values, 1, 0)
-        metadata = pd.DataFrame({"forecast_hour": forecast_hours})
+        # sample x C x T x H x W -> sample x T x C x H x W -> (sample*T) x C x H x W
+        sample_count, channel_count, time_count, height, width = values.shape
+        X = values.transpose(0, 2, 1, 3, 4).reshape(sample_count * time_count, channel_count, height, width)
+        metadata_rows = []
+        for sample_index in range(sample_count):
+            source_file = source_files[sample_index] if sample_index < len(source_files) else None
+            for forecast_hour in forecast_hours:
+                metadata_rows.append(
+                    {
+                        "sample_index": sample_index,
+                        "source_file": source_file,
+                        "forecast_hour": forecast_hour,
+                    }
+                )
+        metadata = pd.DataFrame(metadata_rows)
         axis_order = ["sample", "channel", "latitude", "longitude"]
         tensor_shape = {
             "N": int(X.shape[0]),
@@ -118,9 +153,14 @@ def build_grid_cnn_dataset(
         }
         notes = ["Prepared for PyTorch Conv2d as batch x channels x height x width."]
     else:
-        # Single run sequence: C x T x H x W -> N x C x T x H x W.
-        X = values[np.newaxis, ...]
-        metadata = pd.DataFrame({"sample_index": [0]})
+        # Already sample x C x T x H x W.
+        X = values
+        metadata = pd.DataFrame(
+            {
+                "sample_index": list(range(X.shape[0])),
+                "source_file": [source_files[i] if i < len(source_files) else None for i in range(X.shape[0])],
+            }
+        )
         axis_order = ["sample", "channel", "forecast_step", "latitude", "longitude"]
         tensor_shape = {
             "N": int(X.shape[0]),
@@ -144,7 +184,7 @@ def build_grid_cnn_dataset(
         "latitude_count": latitude_count,
         "longitude_count": longitude_count,
         "target_columns": [],
-        "source_files": json.loads(ds.attrs.get("source_files", "[]")),
+        "source_files": source_files,
         "notes": notes + ["Targets are intentionally not included until observed labels are defined."],
     }
     return X, metadata, manifest

@@ -9,7 +9,7 @@ The preparation scripts expect outputs from the transform pipeline:
 - `station_wind` ML CSV files for station sequence datasets
 - `gridded_wind` NetCDF files for grid CNN datasets
 
-Prediction targets are not created by the transform pipeline yet. Predictor training requires a separate target CSV with one row per tensor sample.
+Prediction targets can be built from prepared tensors for smoke tests and baseline proxy experiments. Production supervised training should eventually use observed labels.
 
 ## Install ML dependencies
 
@@ -17,6 +17,44 @@ The ingest/pipeline Docker image does not install PyTorch by default. For ML tra
 
 ```bash
 pip install -r requirements-ml.txt
+```
+
+## Collect existing gridded outputs from your bucket
+
+List matching `gridded_wind` NetCDF files without downloading:
+
+```bash
+python -m ml.collect_bucket_dataset \
+  --storage-backend gcs \
+  --dry-run
+```
+
+Download a small training cache from the bucket:
+
+```bash
+python -m ml.collect_bucket_dataset \
+  --storage-backend gcs \
+  --output-dir data/ml/bucket_gridded_wind \
+  --max-files 30
+```
+
+If your objects live under a custom prefix, pass it explicitly:
+
+```bash
+python -m ml.collect_bucket_dataset \
+  --storage-backend gcs \
+  --bucket "$GCS_BUCKET_NAME" \
+  --prefix vote/silver/GFS/ \
+  --output-dir data/ml/bucket_gridded_wind
+```
+
+Then prepare a Conv3D training tensor from the downloaded files:
+
+```bash
+python -m ml.prepare_grid_dataset \
+  --input data/ml/bucket_gridded_wind/*.nc \
+  --output-dir data/ml/gridded_wind_conv3d_many \
+  --layout conv3d
 ```
 
 ## Station dataset: Conv1d
@@ -97,6 +135,45 @@ N x C x T x H x W
 
 Where each sample is one full forecast sequence.
 
+## Build target CSVs
+
+Build default wind proxy targets from a prepared dataset:
+
+```bash
+python -m ml.build_targets \
+  --dataset-dir data/ml/gridded_wind_conv3d \
+  --output-csv data/ml/targets.csv
+```
+
+Default target columns:
+
+```text
+max_wind_speed_kph
+mean_wind_speed_kph
+p95_wind_speed_kph
+strong_wind_event
+```
+
+Add final forecast-step targets for Conv3d or station Conv1d datasets:
+
+```bash
+python -m ml.build_targets \
+  --dataset-dir data/ml/gridded_wind_conv3d \
+  --output-csv data/ml/targets_final_step.csv \
+  --targets max_wind_speed_kph mean_wind_speed_kph final_step_mean_wind_speed_kph final_step_max_wind_speed_kph strong_wind_event
+```
+
+Use a different threshold for the binary strong-wind event target:
+
+```bash
+python -m ml.build_targets \
+  --dataset-dir data/ml/gridded_wind_conv3d \
+  --output-csv data/ml/targets_50kph.csv \
+  --strong-wind-threshold-kph 50
+```
+
+These generated targets are proxy targets derived from model input data. They are useful for checking the training loop and building baselines. For a real forecast model, replace or join them with observed labels.
+
 ## Pretrain a 3-layer Conv3D autoencoder
 
 The autoencoder reconstructs `X.npy` and can learn compact spatial-temporal features without labels.
@@ -123,20 +200,13 @@ For longer training, increase `--epochs`. Use `--device cuda` only when PyTorch 
 
 Predictor training requires a target CSV with one row per sample in `X.npy`.
 
-Example target CSV for one Conv3D sample:
-
-```csv
-target
-1.0
-```
-
 Train from scratch:
 
 ```bash
 python -m ml.train_predictor \
   --dataset-dir data/ml/gridded_wind_conv3d \
   --target-csv data/ml/targets.csv \
-  --target-columns target \
+  --target-columns max_wind_speed_kph \
   --output-dir data/ml/runs/predictor_smoke \
   --epochs 1 \
   --batch-size 1 \
@@ -149,7 +219,7 @@ Train using the pretrained autoencoder encoder:
 python -m ml.train_predictor \
   --dataset-dir data/ml/gridded_wind_conv3d \
   --target-csv data/ml/targets.csv \
-  --target-columns target \
+  --target-columns max_wind_speed_kph \
   --pretrained-autoencoder data/ml/runs/autoencoder_smoke/autoencoder.pt \
   --output-dir data/ml/runs/predictor_pretrained_smoke \
   --epochs 1 \

@@ -34,6 +34,28 @@ if [ ! -f "$ENV_FILE" ]; then
   exit 1
 fi
 
+runtime_env_args=()
+add_runtime_env_arg() {
+  local name="$1"
+  local value="${!name:-}"
+  if [ -n "$value" ]; then
+    runtime_env_args+=("-e" "$name=$value")
+  fi
+}
+
+# These optional overrides are intentionally passed after --env-file so manual
+# runs and backfills can override .env without editing it.
+add_runtime_env_arg RUN_DATE
+add_runtime_env_arg RUN_HOUR
+add_runtime_env_arg START_DATE
+add_runtime_env_arg END_DATE
+add_runtime_env_arg FORECAST_START
+add_runtime_env_arg FORECAST_STEP
+add_runtime_env_arg FORECAST_MAX
+add_runtime_env_arg AVAILABILITY_FORECAST_HOUR
+add_runtime_env_arg TRANSFORM_MODE
+add_runtime_env_arg STATIONS_CSV
+
 log "Pipeline runner started backend=$BACKEND image=$IMAGE env_file=$ENV_FILE"
 
 run_s3() {
@@ -41,6 +63,7 @@ run_s3() {
   docker run --rm \
     --env-file "$ENV_FILE" \
     -e STORAGE_BACKEND=s3 \
+    "${runtime_env_args[@]}" \
     "$IMAGE"
   log "Docker pipeline completed backend=s3"
 }
@@ -66,6 +89,7 @@ run_with_gcs_key() {
     -v "$gcp_key_path:$GCP_KEY_CONTAINER_PATH:ro" \
     -e STORAGE_BACKEND="$backend" \
     -e GOOGLE_APPLICATION_CREDENTIALS="$GCP_KEY_CONTAINER_PATH" \
+    "${runtime_env_args[@]}" \
     "$IMAGE"
   log "Docker pipeline completed backend=$backend"
 }
