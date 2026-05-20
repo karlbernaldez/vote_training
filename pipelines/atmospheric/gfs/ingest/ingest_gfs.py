@@ -9,7 +9,9 @@ from botocore.config import Config
 from dotenv import load_dotenv
 from google.cloud import storage
 
-SUPPORTED_STORAGE_BACKENDS = {"gcs", "s3"}
+from .urls import build_download_url
+from .validators import normalize_storage_backend, parse_date
+
 TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 
 
@@ -34,13 +36,6 @@ def sha256sum(file_path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
-
-
-def normalize_storage_backend(storage_backend: str) -> str:
-    backend = storage_backend.strip().lower()
-    if backend not in SUPPORTED_STORAGE_BACKENDS:
-        raise ValueError(f"Unsupported STORAGE_BACKEND '{storage_backend}'")
-    return backend
 
 
 def split_s3_bucket_config(raw_bucket_config: str) -> tuple[str | None, str]:
@@ -76,24 +71,6 @@ def gcs_client() -> storage.Client:
     return storage.Client()
 
 
-def build_download_url(yyyy: str, mm: str, dd: str, hh: str, fhr: str) -> str:
-    return (
-        "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
-        f"?dir=%2Fgfs.{yyyy}{mm}{dd}%2F{hh}%2Fatmos"
-        f"&file=gfs.t{hh}z.pgrb2.0p25.f{fhr}"
-        "&var_UGRD=on&var_VGRD=on&lev_10_m_above_ground=on"
-    )
-
-
-def parse_date(value: str) -> datetime:
-    for fmt in ("%Y%m%d", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(value, fmt)
-        except ValueError:
-            pass
-    raise ValueError(f"Invalid date '{value}'")
-
-
 def daterange(start: datetime, end: datetime):
     current = start
     while current <= end:
@@ -103,7 +80,9 @@ def daterange(start: datetime, end: datetime):
 
 def main() -> None:
     load_dotenv()
-    print("GFS ingest migrated foundation active")
+    normalize_storage_backend(env_value("STORAGE_BACKEND") or "gcs")
+    _ = build_download_url("2026", "01", "01", "00", "000")
+    print("GFS ingest modular migration active")
 
 
 if __name__ == "__main__":
