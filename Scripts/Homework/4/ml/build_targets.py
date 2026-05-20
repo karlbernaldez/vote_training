@@ -13,6 +13,10 @@ DEFAULT_TARGETS = [
     "mean_wind_speed_kph",
     "p95_wind_speed_kph",
     "strong_wind_event",
+    "max_spatial_coverage_strong_wind_pct",
+    "sustained_strong_wind_hours",
+    "marine_wind_hazard_score",
+    "marine_wind_hazard_level",
 ]
 
 SUPPORTED_TARGETS = {
@@ -22,6 +26,12 @@ SUPPORTED_TARGETS = {
     "strong_wind_event",
     "final_step_mean_wind_speed_kph",
     "final_step_max_wind_speed_kph",
+    "max_spatial_coverage_strong_wind_pct",
+    "sustained_strong_wind_steps",
+    "sustained_strong_wind_hours",
+    "max_step_p95_wind_speed_kph",
+    "marine_wind_hazard_score",
+    "marine_wind_hazard_level",
 }
 
 
@@ -66,17 +76,113 @@ def validate_supported_layout(X: np.ndarray, manifest: dict) -> str:
     )
 
 
+def forecast_step_hours(manifest: dict) -> float:
+    forecast_hours = manifest.get("forecast_hours") or []
+    if len(forecast_hours) >= 2:
+        deltas = np.diff(np.array(forecast_hours, dtype=float))
+        positive_deltas = deltas[deltas > 0]
+        if len(positive_deltas):
+            return float(np.median(positive_deltas))
+    return 3.0
+
+
+def longest_true_run(values: np.ndarray) -> int:
+    longest = 0
+    current = 0
+    for value in values.astype(bool):
+        if value:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
+def time_series_for_hazard(sample_speed: np.ndarray, layout: str) -> tuple[np.ndarray, np.ndarray]:
+    """Return step-level p95 wind and strong-wind coverage fractions.
+
+    For time-aware layouts, each value represents one forecast step. For Conv2d,
+    there is no time axis left, so the single sample is treated as one step.
+    """
+    if layout == "conv3d":
+        step_p95 = np.percentile(sample_speed, 95, axis=(1, 2))
+        # coverage by forecast step: fraction of grid cells above threshold is filled later.
+        return step_p95.astype(np.float32), sample_speed
+    if layout == "station_conv1d":
+        # station Conv1d sample_speed is T.
+        return sample_speed.astype(np.float32), sample_speed
+    return np.array([np.percentile(sample_speed, 95)], dtype=np.float32), sample_speed
+
+
+def marine_hazard_level(score: float) -> int:
+    """Bucket a 0-100 hazard score into 0 low, 1 moderate, 2 high, 3 severe."""
+    if score >= 75:
+        return 3
+    if score >= 50:
+        return 2
+    if score >= 25:
+        return 1
+    return 0
+
+
+def marine_hazard_metrics(
+    sample_speed: np.ndarray,
+    layout: str,
+    step_hours: float,
+    strong_wind_threshold_kph: float,
+) -> dict[str, float | int]:
+    """Compute explainable operational marine wind-hazard proxy metrics.
+
+    This is not real wave height. It is a wind-driven hazard proxy based on:
+    - intensity: strongest step-level p95 wind speed
+    - coverage: largest fraction of area/stations above the strong-wind threshold
+    - duration: longest consecutive strong-wind period
+    """
+    step_p95, speed_for_coverage = time_series_for_hazard(sample_speed, layout)
+
+    if layout == "conv3d":
+        coverage_by_step = np.mean(speed_for_coverage >= strong_wind_threshold_kph, axis=(1, 2))
+        strong_steps = step_p95 >= strong_wind_threshold_kph
+    elif layout == "station_conv1d":
+        coverage_by_step = (speed_for_coverage >= strong_wind_threshold_kph).astype(float)
+        strong_steps = speed_for_coverage >= strong_wind_threshold_kph
+    else:
+        coverage_by_step = np.array([float(np.mean(speed_for_coverage >= strong_wind_threshold_kph))])
+        strong_steps = np.array([np.max(speed_for_coverage) >= strong_wind_threshold_kph])
+
+    sustained_steps = longest_true_run(strong_steps)
+    sustained_hours = sustained_steps * step_hours
+    max_step_p95 = float(np.max(step_p95))
+    max_coverage_pct = float(np.max(coverage_by_step) * 100.0)
+
+    # 0-100 score. Threshold-relative intensity dominates; coverage and duration
+    # make the target more operationally useful than a single max grid point.
+    intensity_component = min(max_step_p95 / strong_wind_threshold_kph, 2.0) / 2.0 * 50.0
+    coverage_component = min(max_coverage_pct, 100.0) / 100.0 * 30.0
+    duration_component = min(sustained_hours / 24.0, 1.0) * 20.0
+    score = float(min(100.0, intensity_component + coverage_component + duration_component))
+
+    return {
+        "max_step_p95_wind_speed_kph": max_step_p95,
+        "max_spatial_coverage_strong_wind_pct": max_coverage_pct,
+        "sustained_strong_wind_steps": int(sustained_steps),
+        "sustained_strong_wind_hours": float(sustained_hours),
+        "marine_wind_hazard_score": score,
+        "marine_wind_hazard_level": marine_hazard_level(score),
+    }
+
+
 def build_targets_from_tensor(
     X: np.ndarray,
     manifest: dict,
     targets: list[str] | None = None,
     strong_wind_threshold_kph: float = 39.0,
 ) -> pd.DataFrame:
-    """Build simple target columns from prepared ML tensors.
+    """Build target columns from prepared ML tensors.
 
-    These are model-derived proxy targets useful for smoke tests and baseline
-    experiments. Production supervised training should replace or join these
-    with observed labels when available.
+    Targets are derived from model input data. They are useful for smoke tests,
+    baseline experiments, and operational wind-hazard proxy modeling. Production
+    wave-height training should replace or join these with observed/WW3 labels.
     """
     targets = targets or DEFAULT_TARGETS
     unknown = set(targets) - SUPPORTED_TARGETS
@@ -86,11 +192,18 @@ def build_targets_from_tensor(
     layout = validate_supported_layout(X, manifest)
     speed_index = wind_speed_channel_index(manifest)
     wind_speed = X[:, speed_index]
+    step_hours = forecast_step_hours(manifest)
 
     rows = []
     for sample_index in range(X.shape[0]):
         sample_speed = wind_speed[sample_index]
         row = {"sample_index": sample_index, "layout": layout}
+        hazard_metrics = marine_hazard_metrics(
+            sample_speed,
+            layout=layout,
+            step_hours=step_hours,
+            strong_wind_threshold_kph=strong_wind_threshold_kph,
+        )
 
         if "max_wind_speed_kph" in targets:
             row["max_wind_speed_kph"] = float(np.max(sample_speed))
@@ -108,6 +221,17 @@ def build_targets_from_tensor(
             if layout not in {"conv3d", "station_conv1d"}:
                 raise ValueError("final_step_max_wind_speed_kph requires a time/forecast dimension.")
             row["final_step_max_wind_speed_kph"] = float(np.max(sample_speed[-1]))
+
+        for name in (
+            "max_spatial_coverage_strong_wind_pct",
+            "sustained_strong_wind_steps",
+            "sustained_strong_wind_hours",
+            "max_step_p95_wind_speed_kph",
+            "marine_wind_hazard_score",
+            "marine_wind_hazard_level",
+        ):
+            if name in targets:
+                row[name] = hazard_metrics[name]
 
         rows.append(row)
 
@@ -133,7 +257,7 @@ def parse_args() -> argparse.Namespace:
         "--strong-wind-threshold-kph",
         type=float,
         default=39.0,
-        help="Threshold for strong_wind_event target.",
+        help="Threshold for strong-wind and marine wind-hazard targets.",
     )
     return parser.parse_args()
 
