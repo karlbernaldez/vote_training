@@ -12,6 +12,7 @@ def conv3d_manifest():
         "dataset_type": "gridded_wind_conv3d",
         "axis_order": ["sample", "channel", "forecast_step", "latitude", "longitude"],
         "feature_variables": ["u10_ms", "v10_ms", "wind_speed_kph", "wind_dir_sin", "wind_dir_cos"],
+        "forecast_hours": [0, 3],
     }
 
 
@@ -28,6 +29,7 @@ def station_manifest():
         "dataset_type": "station_wind_cnn_1d",
         "axis_order": ["sample", "channel", "forecast_step"],
         "feature_columns": ["u10_ms", "v10_ms", "wind_speed_kph", "wind_dir_sin", "wind_dir_cos"],
+        "forecast_hours": [0, 3, 6],
     }
 
 
@@ -72,6 +74,7 @@ def test_build_targets_from_conv2d_tensor():
 
     assert targets["max_wind_speed_kph"].tolist() == [40, 4]
     assert targets["strong_wind_event"].tolist() == [1, 0]
+    assert "marine_wind_hazard_score" in targets.columns
 
 
 def test_build_targets_from_station_tensor():
@@ -86,6 +89,39 @@ def test_build_targets_from_station_tensor():
 
     assert targets["final_step_mean_wind_speed_kph"].tolist() == [30]
     assert targets["final_step_max_wind_speed_kph"].tolist() == [30]
+
+
+def test_build_targets_generates_marine_wind_hazard_metrics():
+    X = np.zeros((1, 5, 2, 2, 2), dtype=np.float32)
+    X[0, 2] = np.array(
+        [
+            [[10, 20], [30, 40]],
+            [[50, 60], [70, 80]],
+        ],
+        dtype=np.float32,
+    )
+
+    targets = build_targets_from_tensor(
+        X,
+        conv3d_manifest(),
+        targets=[
+            "max_step_p95_wind_speed_kph",
+            "max_spatial_coverage_strong_wind_pct",
+            "sustained_strong_wind_steps",
+            "sustained_strong_wind_hours",
+            "marine_wind_hazard_score",
+            "marine_wind_hazard_level",
+        ],
+        strong_wind_threshold_kph=39,
+    )
+
+    row = targets.iloc[0]
+    assert row["max_step_p95_wind_speed_kph"] > 70
+    assert row["max_spatial_coverage_strong_wind_pct"] == 100
+    assert row["sustained_strong_wind_steps"] == 1
+    assert row["sustained_strong_wind_hours"] == 3
+    assert 0 <= row["marine_wind_hazard_score"] <= 100
+    assert row["marine_wind_hazard_level"] in {0, 1, 2, 3}
 
 
 def test_build_targets_rejects_unknown_target():
@@ -119,3 +155,4 @@ def test_load_and_save_targets(tmp_path):
     loaded_targets = pd.read_csv(output_csv)
     assert loaded_targets.shape[0] == 1
     assert "max_wind_speed_kph" in loaded_targets.columns
+    assert "marine_wind_hazard_score" in loaded_targets.columns
