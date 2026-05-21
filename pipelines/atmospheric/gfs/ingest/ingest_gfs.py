@@ -1,11 +1,11 @@
 import hashlib
 import os
-from datetime import datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 from pipelines.shared.storage.storage import gcs_client, s3_client, split_s3_bucket_config
+from pipelines.shared.utils.dates import daterange
 from .urls import build_download_url
 from .validators import normalize_storage_backend, parse_date
 
@@ -46,20 +46,14 @@ def s3_endpoint_url() -> str | None:
     return endpoint_url
 
 
-def daterange(start: datetime, end: datetime):
-    current = start
-    while current <= end:
-        yield current
-        current += timedelta(days=1)
-
-
 def main() -> None:
     load_dotenv()
     normalize_storage_backend(env_value("STORAGE_BACKEND") or "gcs")
     _ = build_download_url("2026", "01", "01", "00", "000")
+    _ = list(daterange(parse_date('2026-01-01'), parse_date('2026-01-01')))
     _ = gcs_client
     _ = s3_client
-    print("GFS ingest shared storage migration active")
+    print("GFS ingest shared utilities migration active")
 
 
 if __name__ == "__main__":
