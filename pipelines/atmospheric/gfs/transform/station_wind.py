@@ -1,23 +1,41 @@
 import pandas as pd
-from pipelines.atmospheric.gfs.transform.gridded_wind import transform_gridded_wind
+import xarray as xr
 
 
-def transform_station_wind(input_path: str, output_csv: str, stations: list[dict]) -> pd.DataFrame:
-    ds = transform_gridded_wind(input_path, '/tmp/gridded.nc')
+def transform_station_wind(
+    ds: xr.Dataset,
+    output_csv: str,
+    stations: list[dict],
+) -> pd.DataFrame:
+
     rows = []
 
     for station in stations:
-        lat = station['lat']
-        lon = station['lon']
-        point = ds.sel(latitude=lat, longitude=lon, method='nearest')
-        rows.append({
-            'station': station['name'],
-            'lat': lat,
-            'lon': lon,
-            'wind_speed': float(point['wind_speed'].values),
-            'wind_direction': float(point['wind_direction'].values),
-        })
+        lat = float(station["lat"])
+        lon = float(station["lon"])
+
+        point = ds.sel(
+            latitude=lat,
+            longitude=lon,
+            method="nearest",
+        )
+
+        rows.append(
+            {
+                "station": station.get(
+                    "stnName",
+                    station.get("name", "unknown"),
+                ),
+                "lat": lat,
+                "lon": lon,
+            }
+        )
 
     df = pd.DataFrame(rows)
-    df.to_csv(output_csv, index=False)
+
+    df.to_csv(
+        output_csv,
+        index=False,
+    )
+
     return df

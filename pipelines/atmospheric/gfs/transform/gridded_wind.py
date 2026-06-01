@@ -1,22 +1,30 @@
+from pathlib import Path
 import xarray as xr
-import numpy as np
 
 
-def transform_gridded_wind(input_path: str, output_path: str) -> xr.Dataset:
-    ds = xr.open_dataset(input_path, engine='cfgrib')
+def transform_gridded_wind(
+    input_path: str,
+    netcdf_out: str,
+) -> xr.Dataset:
 
-    u = ds['u10'] if 'u10' in ds else ds['u']
-    v = ds['v10'] if 'v10' in ds else ds['v']
+    input_dir = Path(input_path)
 
-    wind_speed = np.sqrt(u ** 2 + v ** 2)
-    wind_direction = (270 - np.degrees(np.arctan2(v, u))) % 360
+    nc_files = sorted(input_dir.glob("*.nc"))
 
-    out = xr.Dataset({
-        'u10': u,
-        'v10': v,
-        'wind_speed': wind_speed,
-        'wind_direction': wind_direction,
-    })
+    if not nc_files:
+        raise FileNotFoundError(
+            f"No NetCDF files found in {input_dir}"
+        )
 
-    out.to_netcdf(output_path)
-    return out
+    datasets = [xr.open_dataset(f) for f in nc_files]
+
+    ds = xr.concat(datasets, dim="forecast_cycle")
+
+    Path(netcdf_out).parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    ds.to_netcdf(netcdf_out)
+
+    return ds

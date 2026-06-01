@@ -4,6 +4,7 @@ from pipelines.atmospheric.gfs.ml.models.autoencoder import GFSForecastAutoencod
 
 
 def train_autoencoder(features, epochs=10, batch_size=32, lr=1e-3):
+    print("Running")
     dataset = TensorDataset(features, features)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 

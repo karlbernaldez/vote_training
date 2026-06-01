@@ -16,3 +16,6 @@ pipeline.log
 # Service account keys and local secrets
 keys/
 venv/
+
+pipelines/data/
+Scripts/Homework/4/data/

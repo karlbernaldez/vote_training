@@ -92,7 +92,7 @@ def train_predictor(
         output_dim=int(y.shape[1]),
         latent_channels=latent_channels,
         pretrained_autoencoder=pretrained,
-        freeze_encoder=freeze_encoder,
+        # freeze_encoder=freeze_encoder,
     ).to(device)
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=learning_rate)
     criterion = nn.MSELoss()
